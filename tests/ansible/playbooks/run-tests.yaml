@@ -1,0 +1,189 @@
+---
+# Kubernetes CNI Verification Tests Playbook
+# Run CNI verification tests on control plane node
+#
+# Usage:
+#   ansible-playbook -i tests/ansible/inventory/test-nodes.yaml \
+#     tests/ansible/playbooks/run-tests.yaml \
+#     -e test_type=flannel-ipoib \
+#     --ask-pass
+#
+# Parameters:
+#   test_type: Type of CNI test to run (required)
+#     - flannel-ipoib (default)  - Runs 01-verify-flannel-ipoib.sh   <iface> --MODE
+#     - multus-ipoib             - Runs 02-verify-multus-ipoib.sh     --iface <iface> --MODE
+#     - rdma-shared-device       - Runs 03-verify-rdma-shared-device.sh (IFACE=<iface> env) --MODE
+#   test_mode: Test mode (optional)
+#     - quick (default) - Fast validation (<5 minutes)
+#     - full - Comprehensive validation (30-90 minutes)
+#   ipoib_interface: IPoIB interface name (optional)
+#     - Default: <ipoib_iface>
+#
+# Examples:
+#   # Quick mode (default)
+#   ansible-playbook -i tests/ansible/inventory/test-nodes.yaml \
+#     tests/ansible/playbooks/run-tests.yaml \
+#     -e test_type=flannel-ipoib \
+#     --ask-pass
+#
+#   # Full mode
+#   ansible-playbook -i tests/ansible/inventory/test-nodes.yaml \
+#     tests/ansible/playbooks/run-tests.yaml \
+#     -e test_type=multus-ipoib \
+#     -e test_mode=full \
+#     --ask-pass
+#
+
+- name: Run CNI Verification Tests
+  hosts: control_plane
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    test_type: "flannel-ipoib"
+    test_mode: "quick"
+    ipoib_interface: "<ipoib_iface>"
+    repo_root: "{{ playbook_dir }}/../../.."
+  
+  pre_tasks:
+    - name: Validate test_type parameter
+      assert:
+        that:
+          - test_type in ['flannel-ipoib', 'multus-ipoib', 'rdma-shared-device']
+        fail_msg: "test_type must be one of: flannel-ipoib, multus-ipoib, rdma-shared-device"
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Validate test_mode parameter
+      assert:
+        that:
+          - test_mode in ['quick', 'full']
+        fail_msg: "test_mode must be one of: quick, full"
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Set test script name
+      set_fact:
+        test_script: "{{ test_script_map[test_type] }}"
+      vars:
+        test_script_map:
+          flannel-ipoib: "01-verify-flannel-ipoib.sh"
+          multus-ipoib: "02-verify-multus-ipoib.sh"
+          rdma-shared-device: "03-verify-rdma-shared-device.sh"
+    
+    - name: Display test information
+      debug:
+        msg: |
+          ================================================================================
+          CNI VERIFICATION TESTS
+          ================================================================================
+           Test Type: {{ test_type }}
+           Test Mode: {{ test_mode }}
+           Test Script: {{ test_script }}
+           IPoIB Interface: {{ ipoib_interface }}
+           Target Node: {{ ansible_play_hosts[0] }}
+          ================================================================================
+      run_once: true
+      delegate_to: localhost
+  
+  tasks:
+    - name: Create temporary test directory
+      file:
+        path: /tmp/cni-verify
+        state: directory
+        mode: '0755'
+    
+    - name: Copy test script to node
+      copy:
+        src: "{{ repo_root }}/tests/{{ test_script }}"
+        dest: /tmp/cni-verify/{{ test_script }}
+        mode: '0755'
+    
+    - name: Run CNI verification script
+      shell: |
+        cd /tmp/cni-verify
+        {{ test_invocation_map[test_type] }}
+      vars:
+        test_invocation_map:
+          flannel-ipoib: "bash {{ test_script }} {{ ipoib_interface }} --{{ test_mode }}"
+          multus-ipoib: "bash {{ test_script }} --iface {{ ipoib_interface }} --{{ test_mode }}"
+          rdma-shared-device: "IFACE={{ ipoib_interface }} bash {{ test_script }} --{{ test_mode }}"
+      register: test_result
+      failed_when: false
+      changed_when: false
+    
+    - name: Display test output
+      debug:
+        msg: "{{ test_result.stdout_lines }}"
+    
+    - name: Generate test report
+      set_fact:
+        test_report: |
+          
+          ================================================================================
+          CNI VERIFICATION TEST REPORT
+          ================================================================================
+          Node: {{ inventory_hostname }}
+          Test Type: {{ test_type }}
+          Test Mode: {{ test_mode }}
+          Test Script: {{ test_script }}
+          IPoIB Interface: {{ ipoib_interface }}
+          Exit Code: {{ test_result.rc }}
+          Status: {{ 'PASS ✓' if test_result.rc == 0 else 'FAIL ✗' }}
+          
+          Output:
+          {{ test_result.stdout }}
+          
+          {% if test_result.rc != 0 %}
+          Errors:
+          {{ test_result.stderr }}
+          {% endif %}
+          ================================================================================
+    
+    - name: Display test report
+      debug:
+        msg: "{{ test_report }}"
+    
+    - name: Mark test as failed if exit code non-zero
+      set_fact:
+        test_failed: "{{ test_result.rc != 0 }}"
+  
+  post_tasks:
+    - name: Generate test summary
+      set_fact:
+        test_summary: |
+          
+          ================================================================================
+          CNI VERIFICATION SUMMARY
+          ================================================================================
+          Test Type: {{ test_type }}
+          Test Mode: {{ test_mode }}
+          Test Script: {{ test_script }}
+          IPoIB Interface: {{ ipoib_interface }}
+          Control Plane Node: {{ ansible_play_hosts[0] }}
+          
+          RESULT:
+          {% set result = hostvars[ansible_play_hosts[0]].test_result %}
+          Status: {{ 'PASS ✓' if result.rc == 0 else 'FAIL ✗' }}
+          Exit Code: {{ result.rc }}
+          
+          OVERALL: {{ 'ALL TESTS PASSED ✓' if result.rc == 0 else 'TESTS FAILED ✗' }}
+          ================================================================================
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Display test summary
+      debug:
+        msg: "{{ test_summary }}"
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Clean up temporary test files
+      file:
+        path: /tmp/cni-verify
+        state: absent
+    
+    - name: Fail playbook if test failed
+      fail:
+        msg: "CNI verification test failed"
+      when: test_result.rc != 0

@@ -1,0 +1,36 @@
+---
+# Multus default network configuration for automatic IPoIB network attachment
+# This ConfigMap configures Multus to automatically attach the IPoIB network to ALL pods
+#
+# Purpose:
+#   - Enable automatic attachment of IPoIB network (net1) to all pods
+#   - No per-pod annotations required
+#   - Simplifies pod deployment for high-performance workloads
+#
+# Usage:
+#   kubectl apply -f manifests/cni/multus-default-config.yaml
+#
+# Prerequisites:
+#   - Multus CNI deployed
+#   - NetworkAttachmentDefinition 'ipoib-network' exists in kube-system namespace
+#
+# Note:
+#   To disable automatic attachment for specific namespaces, add annotation:
+#     k8s.v1.cni.cncf.io/networks: ""
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multus-default-networks
+  namespace: kube-system
+  labels:
+    app: multus
+data:
+  default-networks: |
+    [
+      {
+        "name": "ipoib-network",
+        "namespace": "kube-system",
+        "interface": "ipoib0"
+      }
+    ]

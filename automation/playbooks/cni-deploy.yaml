@@ -1,0 +1,73 @@
+---
+- name: Deploy CNI Plugin to Kubernetes Cluster
+  hosts: control_plane
+  become: true
+  gather_facts: true
+  
+  vars:
+    deploy_cni: ""
+    ipoib_interface: ""
+    flannel_subnet: "10.244.0.0/16"
+    ipoib_subnet: "192.168.100.0/24"
+    ipoib_mode: "connected"
+    ipoib_mtu: "65520"
+    ipoib_cni_version: "v1.1.0"
+  
+  tasks:
+    - name: Validate deploy_cni parameter
+      assert:
+        that:
+          - deploy_cni in ['flannel-ipoib', 'multus-ipoib', 'rdma-shared-device']
+        fail_msg: "deploy_cni must be one of: flannel-ipoib, multus-ipoib, rdma-shared-device"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Require ipoib_interface for IPoIB workflows
+      assert:
+        that:
+          - ipoib_interface | length > 0
+        fail_msg: |
+          ipoib_interface is required when deploy_cni in [flannel-ipoib, multus-ipoib].
+          The repository ships no hard-coded default because the kernel-assigned
+          IPoIB interface name varies per cluster. Discover the live name with
+          `ip link show` on a target node, then pass:
+            -e ipoib_interface=<ipoib_iface>
+          See docs/README.md (canonical 6-step operational workflow) and
+          docs/architecture/networking.md (platform mapping) for context.
+      when: deploy_cni in ['flannel-ipoib', 'multus-ipoib']
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Check if cluster is running
+      shell: kubectl get nodes
+      register: cluster_check
+      failed_when: cluster_check.rc != 0
+      changed_when: false
+      run_once: true
+    
+    - name: Display cluster nodes
+      debug:
+        msg: "Deploying CNI to cluster with nodes: {{ cluster_check.stdout_lines }}"
+      run_once: true
+    
+    - name: Deploy Flannel IPoIB CNI
+      include_tasks: tasks/deploy-cni-flannel-ipoib.yaml
+      when: deploy_cni == 'flannel-ipoib'
+    
+    - name: Deploy Multus + IPoIB CNI
+      include_tasks: tasks/deploy-cni-multus-ipoib.yaml
+      when: deploy_cni == 'multus-ipoib'
+    
+    - name: Deploy RDMA Shared Device Plugin
+      include_tasks: tasks/deploy-cni-rdma-shared-device.yaml
+      when: deploy_cni == 'rdma-shared-device'
+    
+    - name: Generate deployment summary
+      debug:
+        msg:
+          - "=== CNI Deployment Complete ==="
+          - "CNI Type: {{ deploy_cni }}"
+          - "IPoIB Interface: {{ ipoib_interface }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+      run_once: true
+      delegate_to: localhost

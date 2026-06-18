@@ -1,0 +1,529 @@
+---
+# Ansible task file for removing Multus + IPoIB CNI components
+# This task file orchestrates the removal of:
+#   1. Kubernetes resources (DaemonSets, ConfigMaps, RBAC, CRDs, Namespaces)
+#   2. Node-level files (CNI binaries, configs, data directories)
+#   3. Verification and cleanup
+
+- name: Create backup directory
+  file:
+    path: "/tmp/cni-removal-backup-{{ ansible_date_time.iso8601_basic_short }}"
+    state: directory
+    mode: '0755'
+  register: backup_dir
+  when: not dry_run_mode
+  run_once: true
+
+- name: Display backup directory
+  debug:
+    msg: "Backup directory created: {{ backup_dir.path }}"
+  when: not dry_run_mode
+  run_once: true
+
+- name: Backup current CNI configurations
+  shell: |
+    kubectl get daemonsets -n kube-system -o yaml > {{ backup_dir.path }}/daemonsets-backup.yaml 2>/dev/null || true
+    kubectl get configmaps -n kube-system -o yaml > {{ backup_dir.path }}/configmaps-backup.yaml 2>/dev/null || true
+    kubectl get net-attach-def -A -o yaml > {{ backup_dir.path }}/network-attachment-definitions-backup.yaml 2>/dev/null || true
+    kubectl get crd network-attachment-definitions.k8s.cni.cncf.io -o yaml > {{ backup_dir.path }}/crd-backup.yaml 2>/dev/null || true
+  when: not dry_run_mode
+  run_once: true
+  changed_when: false
+
+- name: Display Phase 1 header
+  debug:
+    msg: "=== Phase 1: Removing Kubernetes Resources ==="
+  run_once: true
+
+# ============================================================================
+# DaemonSets Removal
+# ============================================================================
+
+- name: Check if Multus DaemonSet exists
+  shell: kubectl get daemonset kube-multus-ds -n kube-system
+  register: multus_ds_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete Multus DaemonSet
+  shell: kubectl delete daemonset kube-multus-ds -n kube-system --ignore-not-found=true
+  when: multus_ds_check.rc == 0 and not dry_run_mode
+  register: multus_ds_delete
+  run_once: true
+
+- name: Display Multus DaemonSet deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete DaemonSet kube-multus-ds' if dry_run_mode else 'Deleted DaemonSet: kube-multus-ds' }}"
+  when: multus_ds_check.rc == 0 or dry_run_mode
+  run_once: true
+
+- name: Check if IPoIB CNI DaemonSet exists
+  shell: kubectl get daemonset ipoib-cni -n kube-system
+  register: ipoib_ds_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete IPoIB CNI DaemonSet
+  shell: kubectl delete daemonset ipoib-cni -n kube-system --ignore-not-found=true
+  when: ipoib_ds_check.rc == 0 and not dry_run_mode
+  register: ipoib_ds_delete
+  run_once: true
+
+- name: Display IPoIB CNI DaemonSet deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete DaemonSet ipoib-cni' if dry_run_mode else 'Deleted DaemonSet: ipoib-cni' }}"
+  when: ipoib_ds_check.rc == 0 or dry_run_mode
+  run_once: true
+
+- name: Check if Whereabouts DaemonSet exists
+  shell: kubectl get daemonset whereabouts -n kube-system
+  register: whereabouts_ds_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete Whereabouts DaemonSet
+  shell: kubectl delete daemonset whereabouts -n kube-system --ignore-not-found=true
+  when: whereabouts_ds_check.rc == 0 and not dry_run_mode
+  register: whereabouts_ds_delete
+  run_once: true
+
+- name: Display Whereabouts DaemonSet deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete DaemonSet whereabouts' if dry_run_mode else 'Deleted DaemonSet: whereabouts' }}"
+  when: whereabouts_ds_check.rc == 0 or dry_run_mode
+  run_once: true
+
+- name: Check if Flannel DaemonSet exists (kube-flannel namespace)
+  shell: kubectl get daemonset kube-flannel-ds -n kube-flannel
+  register: flannel_ds_check_ns
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete Flannel DaemonSet (kube-flannel namespace)
+  shell: kubectl delete daemonset kube-flannel-ds -n kube-flannel --ignore-not-found=true
+  when: flannel_ds_check_ns.rc == 0 and not dry_run_mode
+  register: flannel_ds_delete_ns
+  run_once: true
+
+- name: Display Flannel DaemonSet deletion status (kube-flannel namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete DaemonSet kube-flannel-ds (kube-flannel namespace)' if dry_run_mode else 'Deleted DaemonSet: kube-flannel-ds (kube-flannel namespace)' }}"
+  when: flannel_ds_check_ns.rc == 0 or dry_run_mode
+  run_once: true
+
+- name: Check if Flannel DaemonSet exists (kube-system namespace)
+  shell: kubectl get daemonset kube-flannel-ds -n kube-system
+  register: flannel_ds_check_sys
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete Flannel DaemonSet (kube-system namespace)
+  shell: kubectl delete daemonset kube-flannel-ds -n kube-system --ignore-not-found=true
+  when: flannel_ds_check_sys.rc == 0 and not dry_run_mode
+  register: flannel_ds_delete_sys
+  run_once: true
+
+- name: Display Flannel DaemonSet deletion status (kube-system namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete DaemonSet kube-flannel-ds (kube-system namespace)' if dry_run_mode else 'Deleted DaemonSet: kube-flannel-ds (kube-system namespace)' }}"
+  when: flannel_ds_check_sys.rc == 0 or dry_run_mode
+  run_once: true
+
+# ============================================================================
+# NetworkAttachmentDefinitions Removal
+# ============================================================================
+
+- name: Check if NetworkAttachmentDefinitions exist
+  shell: kubectl get net-attach-def -A
+  register: net_attach_def_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete all NetworkAttachmentDefinitions
+  shell: kubectl delete net-attach-def --all -A --ignore-not-found=true
+  when: net_attach_def_check.rc == 0 and not dry_run_mode
+  register: net_attach_def_delete
+  run_once: true
+
+- name: Display NetworkAttachmentDefinitions deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete all NetworkAttachmentDefinitions' if dry_run_mode else 'Deleted all NetworkAttachmentDefinitions' }}"
+  when: net_attach_def_check.rc == 0 or dry_run_mode
+  run_once: true
+
+# ============================================================================
+# ConfigMaps Removal
+# ============================================================================
+
+- name: Delete Multus daemon ConfigMap
+  shell: kubectl delete configmap multus-daemon-config -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: multus_cm_delete
+  run_once: true
+
+- name: Display Multus daemon ConfigMap deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ConfigMap multus-daemon-config' if dry_run_mode else 'Deleted ConfigMap: multus-daemon-config' }}"
+  run_once: true
+
+- name: Delete Multus default networks ConfigMap
+  shell: kubectl delete configmap multus-default-networks -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: multus_default_cm_delete
+  run_once: true
+
+- name: Display Multus default networks ConfigMap deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ConfigMap multus-default-networks' if dry_run_mode else 'Deleted ConfigMap: multus-default-networks' }}"
+  run_once: true
+
+- name: Delete Flannel ConfigMap (kube-flannel namespace)
+  shell: kubectl delete configmap kube-flannel-cfg -n kube-flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_cm_delete_ns
+  run_once: true
+
+- name: Display Flannel ConfigMap deletion status (kube-flannel namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ConfigMap kube-flannel-cfg (kube-flannel namespace)' if dry_run_mode else 'Deleted ConfigMap: kube-flannel-cfg (kube-flannel namespace)' }}"
+  run_once: true
+
+- name: Delete Flannel ConfigMap (kube-system namespace)
+  shell: kubectl delete configmap kube-flannel-cfg -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_cm_delete_sys
+  run_once: true
+
+- name: Display Flannel ConfigMap deletion status (kube-system namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ConfigMap kube-flannel-cfg (kube-system namespace)' if dry_run_mode else 'Deleted ConfigMap: kube-flannel-cfg (kube-system namespace)' }}"
+  run_once: true
+
+# ============================================================================
+# ServiceAccounts Removal
+# ============================================================================
+
+- name: Delete Multus ServiceAccount
+  shell: kubectl delete serviceaccount multus -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: multus_sa_delete
+  run_once: true
+
+- name: Display Multus ServiceAccount deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ServiceAccount multus' if dry_run_mode else 'Deleted ServiceAccount: multus' }}"
+  run_once: true
+
+- name: Delete Whereabouts ServiceAccount
+  shell: kubectl delete serviceaccount whereabouts -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: whereabouts_sa_delete
+  run_once: true
+
+- name: Display Whereabouts ServiceAccount deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ServiceAccount whereabouts' if dry_run_mode else 'Deleted ServiceAccount: whereabouts' }}"
+  run_once: true
+
+- name: Delete Flannel ServiceAccount (kube-flannel namespace)
+  shell: kubectl delete serviceaccount flannel -n kube-flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_sa_delete_ns
+  run_once: true
+
+- name: Display Flannel ServiceAccount deletion status (kube-flannel namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ServiceAccount flannel (kube-flannel namespace)' if dry_run_mode else 'Deleted ServiceAccount: flannel (kube-flannel namespace)' }}"
+  run_once: true
+
+- name: Delete Flannel ServiceAccount (kube-system namespace)
+  shell: kubectl delete serviceaccount flannel -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_sa_delete_sys
+  run_once: true
+
+- name: Display Flannel ServiceAccount deletion status (kube-system namespace)
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ServiceAccount flannel (kube-system namespace)' if dry_run_mode else 'Deleted ServiceAccount: flannel (kube-system namespace)' }}"
+  run_once: true
+
+# ============================================================================
+# ClusterRoleBindings Removal
+# ============================================================================
+
+- name: Delete Multus ClusterRoleBinding
+  shell: kubectl delete clusterrolebinding multus --ignore-not-found=true
+  when: not dry_run_mode
+  register: multus_crb_delete
+  run_once: true
+
+- name: Display Multus ClusterRoleBinding deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRoleBinding multus' if dry_run_mode else 'Deleted ClusterRoleBinding: multus' }}"
+  run_once: true
+
+- name: Delete Whereabouts ClusterRoleBinding
+  shell: kubectl delete clusterrolebinding whereabouts --ignore-not-found=true
+  when: not dry_run_mode
+  register: whereabouts_crb_delete
+  run_once: true
+
+- name: Display Whereabouts ClusterRoleBinding deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRoleBinding whereabouts' if dry_run_mode else 'Deleted ClusterRoleBinding: whereabouts' }}"
+  run_once: true
+
+- name: Delete Flannel ClusterRoleBinding
+  shell: kubectl delete clusterrolebinding flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_crb_delete
+  run_once: true
+
+- name: Display Flannel ClusterRoleBinding deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRoleBinding flannel' if dry_run_mode else 'Deleted ClusterRoleBinding: flannel' }}"
+  run_once: true
+
+# ============================================================================
+# ClusterRoles Removal
+# ============================================================================
+
+- name: Delete Multus ClusterRole
+  shell: kubectl delete clusterrole multus --ignore-not-found=true
+  when: not dry_run_mode
+  register: multus_cr_delete
+  run_once: true
+
+- name: Display Multus ClusterRole deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRole multus' if dry_run_mode else 'Deleted ClusterRole: multus' }}"
+  run_once: true
+
+- name: Delete Whereabouts ClusterRole
+  shell: kubectl delete clusterrole whereabouts-cni --ignore-not-found=true
+  when: not dry_run_mode
+  register: whereabouts_cr_delete
+  run_once: true
+
+- name: Display Whereabouts ClusterRole deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRole whereabouts-cni' if dry_run_mode else 'Deleted ClusterRole: whereabouts-cni' }}"
+  run_once: true
+
+- name: Delete Flannel ClusterRole
+  shell: kubectl delete clusterrole flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: flannel_cr_delete
+  run_once: true
+
+- name: Display Flannel ClusterRole deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete ClusterRole flannel' if dry_run_mode else 'Deleted ClusterRole: flannel' }}"
+  run_once: true
+
+# ============================================================================
+# Custom Resource Definitions Removal
+# ============================================================================
+
+- name: Check if NetworkAttachmentDefinition CRD exists
+  shell: kubectl get crd network-attachment-definitions.k8s.cni.cncf.io
+  register: crd_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete NetworkAttachmentDefinition CRD
+  shell: kubectl delete crd network-attachment-definitions.k8s.cni.cncf.io --ignore-not-found=true
+  when: crd_check.rc == 0 and not dry_run_mode
+  register: crd_delete
+  run_once: true
+
+- name: Display CRD deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete CRD network-attachment-definitions.k8s.cni.cncf.io' if dry_run_mode else 'Deleted CRD: network-attachment-definitions.k8s.cni.cncf.io' }}"
+  when: crd_check.rc == 0 or dry_run_mode
+  run_once: true
+
+# ============================================================================
+# Namespaces Removal
+# ============================================================================
+
+- name: Check if kube-flannel namespace exists
+  shell: kubectl get namespace kube-flannel
+  register: flannel_ns_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Delete kube-flannel namespace
+  shell: kubectl delete namespace kube-flannel --ignore-not-found=true
+  when: flannel_ns_check.rc == 0 and not dry_run_mode
+  register: flannel_ns_delete
+  run_once: true
+
+- name: Display kube-flannel namespace deletion status
+  debug:
+    msg: "{{ 'DRY RUN: Would delete Namespace kube-flannel' if dry_run_mode else 'Deleted Namespace: kube-flannel' }}"
+  when: flannel_ns_check.rc == 0 or dry_run_mode
+  run_once: true
+
+# ============================================================================
+# Phase 2: Node-Level Cleanup
+# ============================================================================
+
+- name: Display Phase 2 header
+  debug:
+    msg: "=== Phase 2: Cleaning Node-Level Files ==="
+  run_once: true
+
+- name: Remove CNI binaries from /opt/cni/bin/
+  file:
+    path: "/opt/cni/bin/{{ item }}"
+    state: absent
+  loop:
+    - ipoib
+    - multus
+    - multus-shim
+    - whereabouts
+    - flannel
+  when: not dry_run_mode
+
+- name: Display CNI binaries removal status (/opt/cni/bin/)
+  debug:
+    msg: "{{ 'DRY RUN: Would remove CNI binaries from /opt/cni/bin/' if dry_run_mode else 'Removed CNI binaries from /opt/cni/bin/' }}"
+
+- name: Remove CNI binaries from /hostroot/opt/cni/bin/
+  file:
+    path: "/hostroot/opt/cni/bin/{{ item }}"
+    state: absent
+  loop:
+    - ipoib
+    - multus
+    - multus-shim
+    - whereabouts
+    - flannel
+  when: not dry_run_mode
+
+- name: Display CNI binaries removal status (/hostroot/opt/cni/bin/)
+  debug:
+    msg: "{{ 'DRY RUN: Would remove CNI binaries from /hostroot/opt/cni/bin/' if dry_run_mode else 'Removed CNI binaries from /hostroot/opt/cni/bin/' }}"
+
+- name: Remove CNI configuration files from /etc/cni/net.d/
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/cni/net.d/00-multus.conf
+    - /etc/cni/net.d/10-flannel.conflist
+    - /etc/cni/net.d/whereabouts.d
+  when: not dry_run_mode
+
+- name: Display CNI configs removal status
+  debug:
+    msg: "{{ 'DRY RUN: Would remove CNI configs from /etc/cni/net.d/' if dry_run_mode else 'Removed CNI configs from /etc/cni/net.d/' }}"
+
+- name: Remove CNI data directories from /var/lib/cni/
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/cni/multus
+    - /var/lib/cni/flannel
+    - /var/lib/cni/networks
+    - /var/lib/cni/results
+  when: not dry_run_mode
+
+- name: Display CNI data directories removal status
+  debug:
+    msg: "{{ 'DRY RUN: Would remove CNI data from /var/lib/cni/' if dry_run_mode else 'Removed CNI data from /var/lib/cni/' }}"
+
+- name: Remove debug/log files
+  file:
+    path: /var/log/cni-ipoib-debug.log
+    state: absent
+  when: not dry_run_mode
+
+- name: Display debug/log files removal status
+  debug:
+    msg: "{{ 'DRY RUN: Would remove /var/log/cni-ipoib-debug.log' if dry_run_mode else 'Removed /var/log/cni-ipoib-debug.log' }}"
+
+# ============================================================================
+# Phase 3: Verification
+# ============================================================================
+
+- name: Display Phase 3 header
+  debug:
+    msg: "=== Phase 3: Verification ==="
+  run_once: true
+
+- name: Check for remaining CNI pods
+  shell: kubectl get pods -A | grep -E 'multus|ipoib|whereabouts|flannel' || true
+  register: remaining_pods
+  changed_when: false
+  run_once: true
+
+- name: Display remaining CNI pods status
+  debug:
+    msg: "{{ 'No remaining CNI pods found' if remaining_pods.stdout == '' else 'WARNING: Some CNI pods still exist' }}"
+  run_once: true
+
+- name: Display remaining CNI pods (if any)
+  debug:
+    var: remaining_pods.stdout_lines
+  when: remaining_pods.stdout != ''
+  run_once: true
+
+- name: Check for stale IPoIB interfaces
+  shell: ip link show | grep -E '@ib[a-z]*[0-9]+' || true
+  register: stale_interfaces
+  changed_when: false
+
+- name: Display stale IPoIB interfaces status
+  debug:
+    msg: "{{ 'No stale IPoIB interfaces found on ' + inventory_hostname if stale_interfaces.stdout == '' else 'WARNING: Stale IPoIB interfaces found on ' + inventory_hostname }}"
+
+- name: Display stale IPoIB interfaces (if any)
+  debug:
+    var: stale_interfaces.stdout_lines
+  when: stale_interfaces.stdout != ''
+
+- name: Get cluster node status
+  shell: kubectl get nodes -o wide
+  register: node_status
+  changed_when: false
+  run_once: true
+
+- name: Display cluster node status
+  debug:
+    var: node_status.stdout_lines
+  run_once: true
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+- name: Display removal summary
+  debug:
+    msg:
+      - "=== CNI Removal Complete ==="
+      - "{{ 'Backup saved to: ' + backup_dir.path if not dry_run_mode else 'DRY RUN - No changes made' }}"
+      - ""
+      - "Summary:"
+      - "  ✓ Removed Multus CNI"
+      - "  ✓ Removed IPoIB CNI (cn-ipoib-cni)"
+      - "  ✓ Removed Whereabouts IPAM"
+      - "  ✓ Removed Flannel CNI"
+      - ""
+      - "WARNING: Nodes are now NotReady (no CNI available)"
+      - ""
+      - "Next steps:"
+      - "  1. Deploy a new CNI if needed"
+      - "  2. Or leave cluster without networking"
+      - "{{ '  3. Review backup in: ' + backup_dir.path if not dry_run_mode else '' }}"
+  run_once: true

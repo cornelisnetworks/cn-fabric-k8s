@@ -1,0 +1,58 @@
+---
+- name: Check kubelet service status
+  systemd:
+    name: kubelet
+  register: kubelet_status
+  failed_when: false
+
+- name: Check if node is in cluster
+  shell: kubectl get nodes {{ ansible_hostname }} -o wide
+  register: node_status
+  failed_when: false
+  changed_when: false
+  when: kubelet_status.status.ActiveState == "active"
+
+- name: Check if this is control plane
+  stat:
+    path: /etc/kubernetes/manifests/kube-apiserver.yaml
+  register: control_plane_check
+
+- name: Get cluster info (control plane only)
+  shell: kubectl cluster-info
+  register: cluster_info
+  failed_when: false
+  changed_when: false
+  when: 
+    - control_plane_check.stat.exists
+    - kubelet_status.status.ActiveState == "active"
+
+- name: Get all nodes (control plane only)
+  shell: kubectl get nodes -o wide
+  register: all_nodes
+  failed_when: false
+  changed_when: false
+  when: 
+    - control_plane_check.stat.exists
+    - kubelet_status.status.ActiveState == "active"
+
+- name: Display node status
+  debug:
+    msg:
+      - "Node: {{ ansible_hostname }}"
+      - "Type: {{ 'Control Plane' if control_plane_check.stat.exists else 'Worker' }}"
+      - "Kubelet: {{ kubelet_status.status.ActiveState }}"
+      - "In Cluster: {{ 'Yes' if (node_status.rc | default(1)) == 0 else 'No' }}"
+
+- name: Display cluster info
+  debug:
+    var: cluster_info.stdout_lines
+  when: 
+    - control_plane_check.stat.exists
+    - cluster_info.stdout is defined
+
+- name: Display all nodes
+  debug:
+    var: all_nodes.stdout_lines
+  when: 
+    - control_plane_check.stat.exists
+    - all_nodes.stdout is defined

@@ -1,0 +1,217 @@
+---
+# Setup Node Tasks
+# Installs and configures Kubernetes prerequisites
+
+- name: Create temporary directory structure
+  file:
+    path: /tmp/automation/scripts/lib
+    state: directory
+    mode: '0755'
+
+- name: Create temporary directories for plugin source trees
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /tmp/plugins/cni-plugins
+    - /tmp/plugins/device-plugins
+
+- name: Copy setup script to nodes
+  copy:
+    src: "{{ playbook_dir }}/../scripts/setup-node.sh"
+    dest: /tmp/setup-node.sh
+    mode: '0755'
+
+- name: Copy package manager library to proper location
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/package-manager.sh"
+    dest: /tmp/automation/scripts/lib/package-manager.sh
+    mode: '0755'
+
+- name: Copy load-versions library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/load-versions.sh"
+    dest: /tmp/automation/scripts/lib/load-versions.sh
+    mode: '0755'
+
+- name: Copy distro-detect library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/distro-detect.sh"
+    dest: /tmp/automation/scripts/lib/distro-detect.sh
+    mode: '0755'
+
+- name: Ensure package-requirements config directory exists
+  file:
+    path: /tmp/automation/config
+    state: directory
+    mode: '0755'
+
+- name: Copy package-requirements.yaml (S9 - source of truth for versions)
+  copy:
+    src: "{{ playbook_dir }}/../config/package-requirements.yaml"
+    dest: /tmp/automation/config/package-requirements.yaml
+    mode: '0644'
+
+- name: Ensure /opt/cni/bin directory exists
+  file:
+    path: /opt/cni/bin
+    state: directory
+    mode: '0755'
+
+# Sync cn-ipoib-cni source to each node so the in-node build pipeline can
+# produce /opt/cni/bin/ipoib. The workstation no longer ships a pre-built
+# binary; setup-node.sh builds it locally on each node via `make build`.
+- name: Sync cn-ipoib-cni source tree to nodes (for in-node build)
+  synchronize:
+    src: "{{ playbook_dir }}/../../plugins/cni-plugins/cn-ipoib-cni/"
+    dest: /tmp/plugins/cni-plugins/cn-ipoib-cni/
+    delete: yes
+    rsync_opts:
+      - "--exclude=build/"
+      - "--exclude=bin/"
+      - "--exclude=.gopath/"
+      - "--exclude=.git"
+
+# Sync cn-rdma-shared-dev-plugin source so the in-node build pipeline can
+# produce both the Go binary and the localhost/cn-rdma-shared-dev-plugin:latest
+# container image (loaded into containerd k8s.io namespace).
+- name: Sync cn-rdma-shared-dev-plugin source tree to nodes (for in-node build + image)
+  synchronize:
+    src: "{{ playbook_dir }}/../../plugins/device-plugins/cn-rdma-shared-dev-plugin/"
+    dest: /tmp/plugins/device-plugins/cn-rdma-shared-dev-plugin/
+    delete: yes
+    rsync_opts:
+      - "--exclude=build/"
+      - "--exclude=.git"
+
+- name: "Validate ipoib_interface format (security - reject option-injection vectors)"
+  ansible.builtin.assert:
+    that:
+      - ipoib_interface is defined
+      - ipoib_interface | regex_search('^[a-zA-Z][a-zA-Z0-9._-]{0,14}$')
+    fail_msg: "ipoib_interface '{{ ipoib_interface }}' invalid. Must start with a letter and match ^[a-zA-Z][a-zA-Z0-9._-]{0,14}$ (leading hyphen rejected to prevent ip command option injection; max 15 chars per IFNAMSIZ)."
+    success_msg: "ipoib_interface '{{ ipoib_interface }}' validated"
+  when: ipoib_interface is defined
+
+- name: Inspect default route before any modification
+  ansible.builtin.command:
+    cmd: ip -json route show default
+  register: pre_default_route
+  changed_when: false
+  when: ipoib_interface is defined
+
+- name: Parse current default route
+  ansible.builtin.set_fact:
+    default_route_info: "{{ pre_default_route.stdout | from_json | first | default({}) }}"
+  when: ipoib_interface is defined
+
+- name: Skip route modification when no default route is present
+  ansible.builtin.debug:
+    msg: "No default route currently configured; nothing to delete"
+  when:
+    - ipoib_interface is defined
+    - default_route_info == {}
+
+- name: Skip route modification when default route is NOT via {{ ipoib_interface }}
+  ansible.builtin.debug:
+    msg: "Default route is via {{ default_route_info.dev | default('?') }} (not {{ ipoib_interface }}); leaving untouched"
+  when:
+    - ipoib_interface is defined
+    - default_route_info != {}
+    - default_route_info.dev | default('') != ipoib_interface
+
+- name: Verify IPoIB interface is UP before route modification
+  ansible.builtin.command:
+    cmd: ip -json link show dev {{ ipoib_interface }}
+  register: iface_state
+  changed_when: false
+  failed_when: false
+  when:
+    - ipoib_interface is defined
+    - default_route_info != {}
+    - default_route_info.dev | default('') == ipoib_interface
+
+- name: Fail if IPoIB interface is not UP (route deletion would orphan node)
+  ansible.builtin.assert:
+    that:
+      - iface_state.rc == 0
+      - (iface_state.stdout | from_json | first).operstate | default('DOWN') == 'UP'
+    fail_msg: "Refusing to delete default route via {{ ipoib_interface }} -- interface is not UP. Node would become unreachable."
+  when:
+    - ipoib_interface is defined
+    - default_route_info != {}
+    - default_route_info.dev | default('') == ipoib_interface
+
+- name: Delete static default route via IPoIB interface (only if interface UP)
+  ansible.builtin.command:
+    cmd: ip route del default via {{ default_route_info.gateway }} dev {{ ipoib_interface }}
+  when:
+    - ipoib_interface is defined
+    - default_route_info != {}
+    - default_route_info.dev | default('') == ipoib_interface
+  register: route_del
+  changed_when: route_del.rc == 0
+  failed_when: false
+
+- name: Define remote build root path (must match setup-node.sh expectations)
+  ansible.builtin.set_fact:
+    setup_node_repo_root: /tmp
+
+# Repo layout on remote node:
+#   /tmp/setup-node.sh                       (copied by 'Copy setup script' task above)
+#   /tmp/automation/scripts/lib/package-manager.sh
+#   /tmp/plugins/cni-plugins/cn-ipoib-cni/   (synchronized above)
+#   /tmp/plugins/device-plugins/cn-rdma-shared-dev-plugin/
+# setup-node.sh honours --repo-root and falls back to REPO_ROOT=/tmp.
+- name: Run setup script (passes REPO_ROOT explicitly; --yes for non-interactive)
+  ansible.builtin.shell: |
+    export REPO_ROOT={{ setup_node_repo_root }}
+    bash /tmp/setup-node.sh --yes
+  args:
+    executable: /bin/bash
+  register: setup_result
+  changed_when: setup_result.rc == 0
+
+- name: Record the Kubernetes version setup-node.sh actually resolved and installed
+  ansible.builtin.set_fact:
+    resolved_k8s_version: "{{ (setup_result.stdout | default('') | regex_search('RESOLVED_K8S_VERSION=([^\\s]+)', '\\1')) | default([k8s_version_var], true) | first }}"
+
+- name: Verify CNI binaries are installed
+  stat:
+    path: "{{ item }}"
+  register: cni_binary_check
+  failed_when: not cni_binary_check.stat.exists or not cni_binary_check.stat.executable
+  loop:
+    - /opt/cni/bin/ipoib
+    - /opt/cni/bin/multus
+    - /opt/cni/bin/flannel
+    - /opt/cni/bin/host-local
+    - /opt/cni/bin/loopback
+    - /opt/cni/bin/bridge
+    - /opt/cni/bin/portmap
+    - /opt/cni/bin/bandwidth
+
+- name: Verify cn-rdma-shared-dev-plugin container image is loaded into containerd k8s.io namespace
+  shell: |
+    ctr -n k8s.io images ls -q | grep -F 'localhost/cn-rdma-shared-dev-plugin:latest'
+  register: rdma_image_check
+  changed_when: false
+  failed_when: rdma_image_check.rc != 0
+
+- name: Display setup results
+  debug:
+    msg: "{{ setup_result.stdout_lines }}"
+
+- name: Display CNI binary installation status
+  debug:
+    msg: "CNI binaries installed: ipoib, multus, flannel, host-local, loopback, bridge, portmap, bandwidth; cn-rdma-shared-dev-plugin image loaded into containerd k8s.io namespace"
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/setup-node.sh
+    - /tmp/automation
+    - /tmp/plugins

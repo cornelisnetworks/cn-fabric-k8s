@@ -1,0 +1,68 @@
+Cornelis Fabric Kubernetes Integration (cn-fabric-k8s)
+Copyright 2026 Cornelis Networks, Inc.
+
+This product includes software developed at Cornelis Networks, Inc.
+
+This product also includes software developed by third parties and
+redistributed under the Apache License, Version 2.0. The original copyright
+and attribution notices for each bundled or derived work are preserved below,
+in accordance with Section 4 of the Apache License, Version 2.0. The full text
+of the Apache License, Version 2.0 is provided in the LICENSE file at the root
+of this repository.
+
+================================================================================
+Bundled forked source components
+================================================================================
+
+1. ipoib-cni
+   Upstream project: Mellanox/ipoib-cni (https://github.com/Mellanox/ipoib-cni)
+   Upstream version: v1.2.2
+   Copyright 2019 Mellanox Technologies Ltd.
+   Copyright 2022 NVIDIA CORPORATION & AFFILIATES.
+   Licensed under the Apache License, Version 2.0.
+   Location in this repository:
+     plugins/cni-plugins/cn-ipoib-cni/
+   Modifications by Cornelis Networks are described in
+     plugins/cni-plugins/cn-ipoib-cni/CORNELIS_FORK.md
+
+2. k8s-rdma-shared-dev-plugin
+   Upstream project: Mellanox/k8s-rdma-shared-dev-plugin
+     (https://github.com/Mellanox/k8s-rdma-shared-dev-plugin)
+   Upstream version: v1.5.3
+     (commit 948098b7540b739463dc03e9010c0ff36c2afd78)
+   Copyright 2018 Mellanox Technologies Ltd.
+   Copyright 2023 NVIDIA CORPORATION & AFFILIATES.
+   Licensed under the Apache License, Version 2.0.
+   Location in this repository:
+     plugins/device-plugins/cn-rdma-shared-dev-plugin/
+   Modifications by Cornelis Networks are described in
+     plugins/device-plugins/cn-rdma-shared-dev-plugin/CORNELIS_FORK.md
+
+================================================================================
+Derived Kubernetes manifests
+================================================================================
+
+The manifests under manifests/cni/ are derived from the following upstream
+projects, each licensed under the Apache License, Version 2.0. Inline
+attribution comments are retained in the individual manifest files.
+
+3. Flannel
+   Upstream project: flannel-io/flannel (https://github.com/flannel-io/flannel)
+   Upstream version: v0.25.4
+   Copyright 2014 flannel authors / CoreOS, Inc.
+   Licensed under the Apache License, Version 2.0.
+
+4. Multus CNI
+   Upstream project: k8snetworkplumbingwg/multus-cni
+     (https://github.com/k8snetworkplumbingwg/multus-cni)
+   Upstream version: v4.0.2
+   Copyright 2016 Intel Corporation
+   Copyright 2021 Multus Authors
+   Licensed under the Apache License, Version 2.0.
+
+5. Whereabouts
+   Upstream project: k8snetworkplumbingwg/whereabouts
+     (https://github.com/k8snetworkplumbingwg/whereabouts)
+   Upstream version: v0.8.0
+   Copyright 2019 k8snetworkplumbingwg
+   Licensed under the Apache License, Version 2.0.

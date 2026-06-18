@@ -1,0 +1,50 @@
+---
+- name: Kubernetes Cluster Control Operations
+  hosts: k8s_nodes
+  become: true
+  gather_facts: true
+  
+  vars:
+    operation: "status"
+    pod_network_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    skip_worker_taint: true
+    drain_before_stop: true
+    delete_worker_on_stop: false
+    force_stop: false
+    join_command: ""
+    control_plane_endpoint: ""
+    join_token: ""
+    join_ca_cert_hash: ""
+    deploy_cni: ""
+    ipoib_interface: ""
+  
+  tasks:
+    - name: Validate operation parameter
+      assert:
+        that:
+          - operation in ['start', 'stop', 'status', 'restart']
+        fail_msg: "operation must be one of: start, stop, status, restart"
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Include status check tasks
+      include_tasks: tasks/cluster-status.yaml
+      when: operation == 'status'
+    
+    - name: Include start tasks
+      include_tasks: tasks/cluster-start.yaml
+      when: operation == 'start' or operation == 'restart'
+    
+    - name: Include stop tasks
+      include_tasks: tasks/cluster-stop.yaml
+      when: operation == 'stop' or operation == 'restart'
+    
+    - name: Generate operation summary
+      debug:
+        msg:
+          - "=== Cluster Control Operation Complete ==="
+          - "Operation: {{ operation }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+      run_once: true
+      delegate_to: localhost

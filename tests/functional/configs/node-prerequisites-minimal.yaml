@@ -1,0 +1,66 @@
+---
+# Minimal Node Prerequisites Configuration
+# Bare minimum requirements for any Kubernetes node
+# No platform-specific requirements
+
+packages:
+  - name: kubelet
+    version_constraint: ">=1.28.0"
+    required: true
+  
+  - name: kubeadm
+    version_constraint: ">=1.28.0"
+    required: true
+  
+  - name: containerd
+    version_constraint: ">=1.6.0"
+    version_constraint_cdi: ">=1.7.0"  # For rdma-shared-device workflow
+    required: true
+  
+  - name: kubectl
+    required: false
+
+system:
+  swap:
+    enabled: false
+    permanent: true
+  
+  kernel_modules:
+    - name: br_netfilter
+      loaded: true
+      persistent: true
+    
+    - name: overlay
+      loaded: true
+      persistent: true
+  
+  sysctl:
+    - parameter: net.bridge.bridge-nf-call-iptables
+      value: 1
+      persistent: true
+    
+    - parameter: net.ipv4.ip_forward
+      value: 1
+      persistent: true
+
+services:
+  - name: kubelet
+    enabled: true
+    running: false
+  
+  - name: containerd
+    enabled: true
+    running: true
+
+optional:
+  firewall:
+    check: false
+  
+  time_sync:
+    check: false
+  
+  network:
+    check: false
+  
+  resources:
+    check: false

@@ -1,0 +1,347 @@
+---
+# Debug playbook for Multus + IPoIB deployment
+# This playbook systematically checks each step of the deployment
+
+- name: Debug Multus + IPoIB Deployment
+  hosts: k8s_nodes
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # ipoib_interface must be supplied via -e or inventory; no hard-coded default.
+    # The kernel-assigned name varies per platform (discover via `ip link show`
+    # on a worker). See docs/architecture/networking.md.
+    ipoib_interface: ""
+    flannel_subnet: "10.244.0.0/16"
+    ipoib_subnet: "192.168.100.0/24"
+    ipoib_mode: "connected"
+    ipoib_mtu: 65520
+    ipoib_cni_version: "v1.1.0"
+  
+  tasks:
+    - name: Require ipoib_interface to be supplied
+      assert:
+        that:
+          - ipoib_interface | length > 0
+        fail_msg: |
+          ipoib_interface is required. Discover the IPoIB interface name with
+          `ip link show` on a worker, then re-run:
+
+              ansible-playbook -i automation/inventory/hosts.yaml \
+                automation/playbooks/debug-multus-ipoib.yaml \
+                -e "ipoib_interface=<ipoib_iface>"
+
+          See docs/README.md and docs/architecture/networking.md for the
+          dual-NIC architecture and operator-supply contract.
+
+    - name: "[DEBUG STEP 1] Check IPoIB interface exists"
+      shell: ip link show {{ ipoib_interface }}
+      register: ipoib_check
+      failed_when: false
+      changed_when: false
+    
+    - name: Display IPoIB interface status
+      debug:
+        msg: "{{ ipoib_check.stdout_lines }}"
+    
+    - name: "[DEBUG STEP 1] Check kernel modules"
+      shell: lsmod | grep -E '(ib_ipoib|br_netfilter)'
+      register: modules_check
+      failed_when: false
+      changed_when: false
+    
+    - name: Display kernel modules
+      debug:
+        msg: "{{ modules_check.stdout_lines }}"
+    
+    - name: "[DEBUG STEP 1] Verify Prerequisites Summary"
+      debug:
+        msg:
+          - "=== STEP 1: Prerequisites Check ==="
+          - "IPoIB Interface: {{ 'PASS' if ipoib_check.rc == 0 else 'FAIL' }}"
+          - "Kernel Modules: {{ 'PASS' if modules_check.rc == 0 else 'FAIL' }}"
+    
+    - name: "[DEBUG STEP 2] Check if Flannel is deployed"
+      shell: kubectl get daemonset kube-flannel-ds -n kube-flannel 2>&1
+      register: flannel_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display Flannel status
+      debug:
+        msg: "{{ flannel_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 2] Check Flannel pods"
+      shell: kubectl get pods -n kube-flannel -o wide 2>&1
+      register: flannel_pods
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display Flannel pods
+      debug:
+        msg: "{{ flannel_pods.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 3] Check if Multus is deployed"
+      shell: kubectl get daemonset kube-multus-ds -n kube-system 2>&1
+      register: multus_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display Multus status
+      debug:
+        msg: "{{ multus_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 3] Check Multus pods"
+      shell: kubectl get pods -n kube-system -l name=multus -o wide 2>&1
+      register: multus_pods
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display Multus pods
+      debug:
+        msg: "{{ multus_pods.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 3] Check NetworkAttachmentDefinition CRD"
+      shell: kubectl get crd network-attachment-definitions.k8s.cni.cncf.io 2>&1
+      register: nad_crd_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display NAD CRD status
+      debug:
+        msg: "{{ nad_crd_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 4] Check if IPoIB CNI binary exists"
+      stat:
+        path: /opt/cni/bin/ipoib
+      register: ipoib_binary_check
+    
+    - name: Display IPoIB binary status
+      debug:
+        msg: "IPoIB binary at /opt/cni/bin/ipoib: {{ 'EXISTS' if ipoib_binary_check.stat.exists else 'MISSING' }}"
+    
+    - name: "[DEBUG STEP 4] Check IPoIB CNI DaemonSet"
+      shell: kubectl get daemonset ipoib-cni -n kube-system 2>&1
+      register: ipoib_ds_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display IPoIB DaemonSet status
+      debug:
+        msg: "{{ ipoib_ds_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 4] Check IPoIB CNI pods"
+      shell: kubectl get pods -n kube-system -l app=ipoib-cni -o wide 2>&1
+      register: ipoib_pods
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display IPoIB pods
+      debug:
+        msg: "{{ ipoib_pods.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 4] Check IPoIB pod logs if exists"
+      shell: kubectl logs -n kube-system -l app=ipoib-cni --tail=20 --all-containers 2>&1 | head -50
+      register: ipoib_logs
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display IPoIB pod logs
+      debug:
+        msg: "{{ ipoib_logs.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 5] Check Whereabouts IPAM"
+      shell: kubectl get daemonset whereabouts -n kube-system 2>&1
+      register: whereabouts_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display Whereabouts status
+      debug:
+        msg: "{{ whereabouts_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 6] Check NetworkAttachmentDefinition"
+      shell: kubectl get network-attachment-definitions.k8s.cni.cncf.io -A 2>&1
+      register: nad_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display NAD list
+      debug:
+        msg: "{{ nad_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 6] Get ipoib-network NAD details"
+      shell: kubectl get network-attachment-definitions.k8s.cni.cncf.io ipoib-network -n kube-system -o yaml 2>&1
+      register: nad_details
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display NAD details
+      debug:
+        msg: "{{ nad_details.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 7] Check auto-attach ConfigMap"
+      shell: kubectl get configmap multus-default-networks -n kube-system -o yaml 2>&1
+      register: autoattach_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display auto-attach ConfigMap
+      debug:
+        msg: "{{ autoattach_check.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 7] Check Multus CNI config files"
+      shell: ls -la /etc/cni/net.d/ && echo "---" && cat /etc/cni/net.d/*.conf* 2>&1 | head -100
+      register: multus_config_check
+      failed_when: false
+      changed_when: false
+    
+    - name: Display Multus config files
+      debug:
+        msg: "{{ multus_config_check.stdout_lines }}"
+    
+    - name: "[DEBUG STEP 8] Create test pod"
+      shell: |
+        kubectl delete pod test-multus-debug --ignore-not-found=true
+        kubectl run test-multus-debug --image=alpine:3.18 --command -- sleep 3600
+      register: test_pod_create
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Wait for test pod
+      shell: kubectl wait --for=condition=ready pod/test-multus-debug --timeout=60s 2>&1
+      register: test_pod_wait
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 8] Check test pod interfaces"
+      shell: kubectl exec test-multus-debug -- ip addr show 2>&1
+      register: test_pod_interfaces
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display test pod interfaces
+      debug:
+        msg: "{{ test_pod_interfaces.stdout_lines }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 8] Check for eth0"
+      shell: kubectl exec test-multus-debug -- ip link show eth0 2>&1
+      register: eth0_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 8] Check for net1"
+      shell: kubectl exec test-multus-debug -- ip link show net1 2>&1
+      register: net1_check
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display interface check results
+      debug:
+        msg:
+          - "eth0 (Flannel): {{ 'PRESENT' if eth0_check.rc == 0 else 'MISSING' }}"
+          - "net1 (IPoIB): {{ 'PRESENT' if net1_check.rc == 0 else 'MISSING' }}"
+      run_once: true
+    
+    - name: "[DEBUG STEP 8] Check test pod annotations"
+      shell: kubectl get pod test-multus-debug -o jsonpath='{.metadata.annotations}' 2>&1
+      register: pod_annotations
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: Display pod annotations
+      debug:
+        msg: "{{ pod_annotations.stdout }}"
+      run_once: true
+    
+    - name: Cleanup test pod
+      shell: kubectl delete pod test-multus-debug --ignore-not-found=true
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+    
+    - name: "[DEBUG SUMMARY] Generate final report"
+      debug:
+        msg:
+          - "=========================================="
+          - "MULTUS-IPOIB DEPLOYMENT DEBUG REPORT"
+          - "=========================================="
+          - "Step 1 - Prerequisites:"
+          - "  IPoIB Interface ({{ ipoib_interface }}): {{ 'PASS' if ipoib_check.rc == 0 else 'FAIL' }}"
+          - "  Kernel Modules: {{ 'PASS' if modules_check.rc == 0 else 'FAIL' }}"
+          - ""
+          - "Step 2 - Flannel:"
+          - "  DaemonSet: {{ 'DEPLOYED' if 'kube-flannel-ds' in flannel_check.stdout else 'NOT FOUND' }}"
+          - ""
+          - "Step 3 - Multus:"
+          - "  DaemonSet: {{ 'DEPLOYED' if 'kube-multus-ds' in multus_check.stdout else 'NOT FOUND' }}"
+          - "  NAD CRD: {{ 'INSTALLED' if nad_crd_check.rc == 0 else 'MISSING' }}"
+          - ""
+          - "Step 4 - IPoIB CNI:"
+          - "  Binary on {{ inventory_hostname }}: {{ 'EXISTS' if ipoib_binary_check.stat.exists else 'MISSING' }}"
+          - "  DaemonSet: {{ 'DEPLOYED' if 'ipoib-cni' in ipoib_ds_check.stdout else 'NOT FOUND' }}"
+          - ""
+          - "Step 5 - Whereabouts:"
+          - "  DaemonSet: {{ 'DEPLOYED' if 'whereabouts' in whereabouts_check.stdout else 'NOT FOUND' }}"
+          - ""
+          - "Step 6 - NetworkAttachmentDefinition:"
+          - "  ipoib-network: {{ 'CREATED' if 'ipoib-network' in nad_check.stdout else 'MISSING' }}"
+          - ""
+          - "Step 7 - Auto-attach:"
+          - "  ConfigMap: {{ 'EXISTS' if autoattach_check.rc == 0 else 'MISSING' }}"
+          - ""
+          - "Step 8 - Test Pod:"
+          - "  eth0: {{ 'PRESENT' if eth0_check.rc == 0 else 'MISSING' }}"
+          - "  net1: {{ 'PRESENT' if net1_check.rc == 0 else 'MISSING' }}"
+          - "=========================================="
+      run_once: true

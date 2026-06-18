@@ -1,0 +1,69 @@
+---
+# Clean Node Tasks
+# Removes all Kubernetes components from nodes
+
+- name: Create temporary directory structure
+  file:
+    path: /tmp/automation/scripts/lib
+    state: directory
+    mode: '0755'
+
+- name: Copy cleanup script to nodes
+  copy:
+    src: "{{ playbook_dir }}/../scripts/clean-node.sh"
+    dest: /tmp/clean-node.sh
+    mode: '0755'
+
+- name: Copy package manager library to proper location
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/package-manager.sh"
+    dest: /tmp/automation/scripts/lib/package-manager.sh
+    mode: '0755'
+
+- name: Copy load-versions library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/load-versions.sh"
+    dest: /tmp/automation/scripts/lib/load-versions.sh
+    mode: '0755'
+
+- name: Copy distro-detect library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/distro-detect.sh"
+    dest: /tmp/automation/scripts/lib/distro-detect.sh
+    mode: '0755'
+
+- name: Ensure config directory exists
+  file:
+    path: /tmp/automation/config
+    state: directory
+    mode: '0755'
+
+- name: Copy package-requirements.yaml (versions source-of-truth)
+  copy:
+    src: "{{ playbook_dir }}/../config/package-requirements.yaml"
+    dest: /tmp/automation/config/package-requirements.yaml
+    mode: '0644'
+
+- name: Run cleanup script
+  shell: |
+    export REPO_ROOT=/tmp
+    {% if remove_images_flag | default(false) %}
+    bash /tmp/clean-node.sh --yes --remove-images
+    {% else %}
+    bash /tmp/clean-node.sh --yes
+    {% endif %}
+  register: cleanup_result
+  changed_when: not dry_run_mode
+
+- name: Display cleanup results
+  debug:
+    msg: "{{ cleanup_result.stdout_lines }}"
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/clean-node.sh
+    - /tmp/automation
+  when: not dry_run_mode

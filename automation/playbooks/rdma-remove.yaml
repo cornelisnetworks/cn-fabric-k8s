@@ -1,0 +1,50 @@
+---
+# Remove RDMA Shared Device Plugin from Kubernetes cluster
+# This playbook removes all RDMA shared device plugin components
+#
+# Usage:
+#   ansible-playbook automation/playbooks/rdma-remove.yaml
+#   ansible-playbook automation/playbooks/rdma-remove.yaml -e "skip_confirmation=true"
+#   ansible-playbook automation/playbooks/rdma-remove.yaml -e "dry_run_mode=true"
+
+- name: Remove RDMA Shared Device Plugin
+  hosts: control_plane
+  become: yes
+  gather_facts: yes
+  vars:
+    dry_run_mode: false
+    skip_confirmation: false
+    backup_dir: "/tmp/rdma-removal-backup-{{ ansible_date_time.iso8601_basic_short }}"
+
+  tasks:
+    - name: Display removal plan
+      debug:
+        msg:
+          - "=== RDMA Shared Device Plugin Removal Plan ==="
+          - "Dry run mode: {{ dry_run_mode }}"
+          - "Skip confirmation: {{ skip_confirmation }}"
+          - "Backup directory: {{ backup_dir }}"
+          - ""
+          - "The following will be removed:"
+          - "  - DaemonSet: rdma-shared-device-plugin (kube-system)"
+          - "  - ConfigMap: rdma-cdi-device-config (kube-system)"
+          - "  - ServiceAccount: rdma-shared-device-plugin (kube-system)"
+          - "  - ClusterRole: rdma-shared-device-plugin"
+          - "  - ClusterRoleBinding: rdma-shared-device-plugin"
+          - "  - Flannel CNI (kube-flannel namespace)"
+
+    - name: Confirm removal
+      pause:
+        prompt: "Do you want to continue with RDMA removal? (yes/no)"
+      register: confirmation
+      when: not skip_confirmation and not dry_run_mode
+
+    - name: Validate confirmation
+      assert:
+        that:
+          - confirmation.user_input | lower == 'yes'
+        fail_msg: "Removal cancelled by user"
+      when: not skip_confirmation and not dry_run_mode
+
+    - name: Include RDMA removal tasks
+      include_tasks: tasks/remove-cni-rdma-shared-device.yaml

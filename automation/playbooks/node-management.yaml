@@ -1,0 +1,115 @@
+---
+# Kubernetes Node Management Playbook
+# Manages node prerequisites, cleanup, and setup operations
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yaml node-management.yaml -e "operation=check"
+#   ansible-playbook -i inventory/hosts.yaml node-management.yaml -e "operation=clean"
+#   ansible-playbook -i inventory/hosts.yaml node-management.yaml -e "operation=setup"
+#
+# Variables:
+#   operation: check|clean|setup (required)
+#   dry_run: true|false (default: false)
+#   k8s_version: Kubernetes version (default: 1.28.5)
+#   remove_images: true|false (default: false, for clean operation - set true to delete images)
+#   platform: cn5000|auto (default: auto)
+
+- name: Kubernetes Node Management
+  hosts: k8s_nodes
+  become: yes
+  
+  vars:
+    operation_mode: "{{ operation | default('check') }}"
+    dry_run_mode: "{{ dry_run | default(false) }}"
+    k8s_version_var: "{{ k8s_version | default('1.28.5') }}"
+    remove_images_flag: "{{ remove_images | default(false) }}"
+    platform_type: "{{ platform | default('auto') }}"
+  
+  pre_tasks:
+    - name: Validate operation parameter
+      fail:
+        msg: "Invalid operation: {{ operation_mode }}. Must be one of: check, clean, setup"
+      when: operation_mode not in ['check', 'clean', 'setup']
+    
+    - name: Display operation information
+      debug:
+        msg: |
+          Operation: {{ operation_mode }}
+          Dry run: {{ dry_run_mode }}
+          K8s version: {{ k8s_version_var }}
+          Platform: {{ platform_type }}
+  
+  tasks:
+    - name: Include check prerequisites tasks
+      include_tasks: tasks/check-prerequisites.yaml
+      when: operation_mode == 'check'
+    
+    - name: Include clean node tasks
+      include_tasks: tasks/clean-node.yaml
+      when: operation_mode == 'clean'
+    
+    - name: Include setup node tasks
+      include_tasks: tasks/setup-node.yaml
+      when: operation_mode == 'setup'
+  
+  post_tasks:
+    - name: Generate summary report
+      set_fact:
+        summary_report: |
+          
+          ================================================================================
+          KUBERNETES NODE MANAGEMENT REPORT
+          ================================================================================
+          Operation: {{ operation_mode | upper }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Total Nodes: {{ ansible_play_hosts | length }}
+          
+          {% if operation_mode == 'check' %}
+          NODE STATUS SUMMARY:
+          {% for host in ansible_play_hosts %}
+          {% set result = hostvars[host].check_result | default({}) %}
+          {% if result %}
+          
+          {{ host }}:
+            Status: {{ result.status | upper }}
+            Checks: {{ result.summary.passed }}/{{ result.summary.total }} passed
+            {% if result.summary.failed > 0 %}Failed: {{ result.summary.failed }}{% endif %}
+            {% if result.summary.warnings > 0 %}Warnings: {{ result.summary.warnings }}{% endif %}
+          {% else %}
+          
+          {{ host }}:
+            Status: UNKNOWN (check failed or no result)
+          {% endif %}
+          {% endfor %}
+          {% endif %}
+          
+          {% if operation_mode == 'clean' %}
+          CLEANUP SUMMARY:
+          {% for host in ansible_play_hosts %}
+          
+          {{ host }}:
+            Cleanup: Completed
+            Backup: /var/log/k8s-cleanup-*
+          {% endfor %}
+          {% endif %}
+          
+          {% if operation_mode == 'setup' %}
+          SETUP SUMMARY:
+          {% for host in ansible_play_hosts %}
+          
+          {{ host }}:
+            Setup: Completed
+            K8s Version: {{ hostvars[host].resolved_k8s_version | default(k8s_version_var) }}
+            Platform: {{ platform_type }}
+          {% endfor %}
+          {% endif %}
+          
+          ================================================================================
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Display summary report
+      debug:
+        msg: "{{ summary_report }}"
+      run_once: true
+      delegate_to: localhost

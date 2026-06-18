@@ -1,0 +1,28 @@
+---
+# Test Inventory for Kubernetes Nodes
+# Define nodes where tests should be executed
+
+all:
+  children:
+    test_nodes:
+      children:
+        control_plane_nodes:
+          hosts:
+            control-plane:
+              ansible_host: control-plane
+              ansible_user: root
+              ansible_python_interpreter: /usr/bin/python3
+              platform: auto
+              node_role: control_plane
+        
+        worker_nodes:
+          hosts:
+            worker:
+              ansible_host: worker
+              ansible_user: root
+              ansible_python_interpreter: /usr/bin/python3
+              platform: auto
+              node_role: worker
+  
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'

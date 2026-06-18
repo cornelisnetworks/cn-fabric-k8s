@@ -1,0 +1,195 @@
+---
+- name: Validate IPoIB interface exists
+  shell: ip link show {{ ipoib_interface }}
+  register: ipoib_check
+  failed_when: ipoib_check.rc != 0
+  changed_when: false
+
+- name: Display IPoIB interface info
+  debug:
+    msg: "IPoIB interface {{ ipoib_interface }} found and will be used for Flannel VXLAN"
+
+- name: Check IPoIB interface is UP
+  shell: ip link show {{ ipoib_interface }} | grep -q "state UP"
+  register: ipoib_state
+  failed_when: false
+  changed_when: false
+
+- name: Warn if IPoIB interface is DOWN
+  debug:
+    msg: "WARNING: IPoIB interface {{ ipoib_interface }} is DOWN. This may be normal if Subnet Manager is not running. Flannel will attempt to use it anyway."
+  when: ipoib_state.rc != 0
+
+- name: Check required kernel modules are loaded
+  shell: lsmod | grep -E '(ib_ipoib|vxlan)'
+  register: modules_check
+  failed_when: modules_check.rc != 0
+  changed_when: false
+
+- name: Display loaded kernel modules
+  debug:
+    msg: "Required kernel modules loaded: {{ modules_check.stdout_lines }}"
+
+- name: Check rp_filter setting
+  shell: sysctl net.ipv4.conf.all.rp_filter | awk '{print $3}'
+  register: rp_filter_check
+  changed_when: false
+
+- name: Warn if rp_filter is too strict
+  debug:
+    msg: "WARNING: rp_filter is set to {{ rp_filter_check.stdout }}. For VXLAN over IPoIB, it should be 0 or 2 (loose mode). Current setting may cause connectivity issues."
+  when: rp_filter_check.stdout == "1"
+
+- name: Verify required CNI binaries are installed
+  stat:
+    path: "{{ item }}"
+  register: cni_binary_precheck
+  loop:
+    - /opt/cni/bin/ipoib
+    - /opt/cni/bin/flannel
+    - /opt/cni/bin/host-local
+  loop_control:
+    label: "{{ item }}"
+
+- name: Check for missing CNI binaries
+  fail:
+    msg: |
+      ERROR: Required CNI binary not found or not executable: {{ item.item }}
+      
+      This binary should have been installed during node setup (Step 1).
+      
+      To fix this issue:
+      1. Re-run node setup: ansible-playbook -i inventory/hosts.yaml setup-cluster.yaml -e "operation=setup"
+      2. Or manually install CNI binaries on all nodes
+      
+      See docs/deployment/cni-binary-installation.md for details.
+  when: not item.stat.exists or not item.stat.executable
+  loop: "{{ cni_binary_precheck.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Confirm CNI binaries are pre-installed
+  debug:
+    msg: "✓ All required CNI binaries verified (installed during node setup)"
+
+- name: Create temporary manifests directory
+  file:
+    path: /tmp/k8s-manifests
+    state: directory
+    mode: '0755'
+
+- name: Template Flannel IPoIB manifest
+  template:
+    src: "{{ playbook_dir }}/../../manifests/cni/flannel-ipoib.yaml"
+    dest: /tmp/k8s-manifests/flannel-ipoib.yaml
+    mode: '0644'
+
+- name: Display manifest location
+  debug:
+    msg: "Flannel IPoIB manifest templated to /tmp/k8s-manifests/flannel-ipoib.yaml with interface={{ ipoib_interface }}"
+
+- name: Apply Flannel IPoIB manifest
+  shell: kubectl apply -f /tmp/k8s-manifests/flannel-ipoib.yaml
+  register: flannel_apply
+  changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+
+- name: Display Flannel apply output
+  debug:
+    var: flannel_apply.stdout_lines
+
+- name: Wait for Flannel DaemonSet to be created
+  shell: kubectl get daemonset kube-flannel-ds -n kube-flannel
+  register: ds_exists
+  until: ds_exists.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
+
+- name: Wait for Flannel DaemonSet rollout
+  shell: kubectl rollout status daemonset/kube-flannel-ds -n kube-flannel --timeout=300s
+  register: rollout_status
+  changed_when: false
+
+- name: Display rollout status
+  debug:
+    var: rollout_status.stdout_lines
+
+- name: Verify Flannel pods are running
+  shell: kubectl get pods -n kube-flannel -o wide
+  register: flannel_pods
+  changed_when: false
+
+- name: Display Flannel pods
+  debug:
+    var: flannel_pods.stdout_lines
+
+- name: Verify --iface argument in DaemonSet
+  shell: kubectl get ds kube-flannel-ds -n kube-flannel -o yaml | grep "iface={{ ipoib_interface }}"
+  register: iface_verify
+  failed_when: iface_verify.rc != 0
+  changed_when: false
+
+- name: Confirm --iface configuration
+  debug:
+    msg: "✓ Flannel DaemonSet configured with --iface={{ ipoib_interface }}"
+
+- name: Wait for nodes to become Ready
+  shell: kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | grep -o True | wc -l
+  register: ready_nodes
+  until: ready_nodes.stdout | int >= (groups['k8s_nodes'] | length)
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Get final node status
+  shell: kubectl get nodes -o wide
+  register: final_nodes
+  changed_when: false
+
+- name: Display final node status
+  debug:
+    var: final_nodes.stdout_lines
+
+- name: Verify flannel.1 interface on local node
+  shell: ip -d link show flannel.1 2>/dev/null || echo "flannel.1 not yet created"
+  register: flannel_vtep
+  changed_when: false
+
+- name: Display flannel.1 interface info
+  debug:
+    msg: "{{ flannel_vtep.stdout_lines }}"
+
+- name: Check if flannel.1 is bound to IPoIB interface
+  shell: ip -d link show flannel.1 | grep "dev {{ ipoib_interface }}"
+  register: vtep_binding
+  failed_when: false
+  changed_when: false
+
+- name: Confirm VTEP binding
+  debug:
+    msg: "✓ flannel.1 VXLAN interface is bound to {{ ipoib_interface }}"
+  when: vtep_binding.rc == 0
+
+- name: Warn if VTEP binding not verified
+  debug:
+    msg: "⚠ Could not verify flannel.1 binding to {{ ipoib_interface }}. This may be normal if checked too quickly. Verify manually with: ip -d link show flannel.1"
+  when: vtep_binding.rc != 0
+
+- name: Display deployment summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Flannel IPoIB CNI Deployment Complete"
+      - "=========================================="
+      - "Interface: {{ ipoib_interface }}"
+      - "Pod Network: 10.244.0.0/16"
+      - "Backend: VXLAN"
+      - "Nodes Ready: {{ ready_nodes.stdout }}/{{ groups['k8s_nodes'] | length }}"
+      - ""
+      - "Verification commands:"
+      - "  kubectl get nodes"
+      - "  kubectl get pods -n kube-flannel"
+      - "  ip -d link show flannel.1"
+      - "  ss -ulnp | grep 8472"
+      - ""
+      - "See docs/deployment/flannel-ipoib-cni.md for troubleshooting"

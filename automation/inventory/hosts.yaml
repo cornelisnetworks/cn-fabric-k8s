@@ -1,0 +1,63 @@
+---
+# ----------------------------------------------------------------------
+# Cornelis Networks CN Fabric K8s -- Ansible Inventory (LAB / DEV)
+# ----------------------------------------------------------------------
+# WARNING: This inventory uses `ansible_user: root` -- ALL automation runs
+# as root on every node. This is appropriate for a closed CN5000 testbed
+# where the operator owns the entire fleet. For production:
+#   1. Create a dedicated automation account (e.g. `cnops`) on each node.
+#   2. Grant NOPASSWD sudo for the specific commands the playbooks need.
+#   3. Replace `ansible_user: root` below with `ansible_user: cnops` and
+#      add `ansible_become: true` plus `ansible_become_user: root`.
+# ----------------------------------------------------------------------
+
+all:
+  children:
+    k8s_cluster:
+      children:
+        control_plane:
+          hosts:
+            control-plane:
+              ansible_host: 10.0.0.100  # TODO: replace with your control-plane node IP
+              ansible_user: root
+              ansible_python_interpreter: /usr/bin/python3
+        
+        workers:
+          hosts:
+            worker:
+              ansible_host: 10.0.0.101  # TODO: replace with your worker node IP
+              ansible_user: root
+              ansible_python_interpreter: /usr/bin/python3
+              platform: auto
+    
+    k8s_nodes:
+      children:
+        control_plane:
+        workers:
+  
+  vars:
+    k8s_version: "1.28.5"
+    # ----------------------------------------------------------------------
+    # WARNING -- LAB / DEV ONLY:
+    # StrictHostKeyChecking=no disables SSH host key verification, enabling
+    # man-in-the-middle attacks against this Ansible control host. This is
+    # ACCEPTABLE in an isolated lab where nodes are re-imaged frequently and
+    # the network path is trusted. It is NOT acceptable in production.
+    #
+    # Production replacement (recommended):
+    #   1. Run `ssh-keyscan <control-plane-ip> <worker-ip> >> ~/.ssh/known_hosts`
+    #      once after first provisioning.
+    #   2. Remove the line below.
+    # ----------------------------------------------------------------------
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'  # LAB ONLY
+    # SSH authentication
+    # ----------------------------------------------------------------------
+    # ansible_password is intentionally NOT committed to this inventory.
+    # Choose ONE of these patterns:
+    #   1. SSH key (recommended): place public key in /root/.ssh/authorized_keys
+    #      on each node; run plays without --ask-pass.
+    #   2. Ansible Vault: ansible-vault create automation/inventory/secrets.yaml
+    #      containing 'ansible_password: <pwd>', then include it via:
+    #        ansible-playbook --ask-vault-pass -e @automation/inventory/secrets.yaml ...
+    #   3. Interactive: pass --ask-pass on the command line.
+    # ----------------------------------------------------------------------

@@ -1,0 +1,78 @@
+---
+# Cornelis Networks Custom IPoIB CNI installation DaemonSet
+# This manifest installs the custom cn-ipoib-cni binary on all nodes
+#
+# Purpose:
+#   - Install custom cn-ipoib-cni binary at /opt/cni/bin/ipoib
+#   - Enable native IPoIB interface creation for pods using ip link commands
+#   - Provides keepalive monitoring for cn-ipoib-cni binary
+#
+# Usage:
+#   1. Via Ansible (recommended):
+#      ansible-playbook -i automation/inventory/hosts.yaml \
+#        automation/playbooks/cni-deploy.yaml \
+#        -e deploy_cni=multus-ipoib
+#
+#   2. Manual deployment:
+#      kubectl apply -f manifests/cni/ipoib-cni-daemonset.yaml
+#
+# Prerequisites:
+#   - cn-ipoib-cni binary built at plugins/cni-plugins/cn-ipoib-cni/bin/ipoib
+#   - Binary deployed to /opt/cni/bin/ipoib on all nodes via Ansible
+#   - IPoIB interface exists on all nodes
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ipoib-cni
+  namespace: kube-system
+  labels:
+    tier: node
+    app: ipoib-cni
+spec:
+  selector:
+    matchLabels:
+      name: ipoib-cni
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: ipoib-cni
+        name: ipoib-cni
+    spec:
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      containers:
+      - name: ipoib-cni-keepalive
+        image: alpine:3.18
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "cn-ipoib-cni keepalive. Monitoring binary..."
+          while true; do
+            if [ ! -f /host/opt/cni/bin/ipoib ]; then
+              echo "ERROR: IPoIB CNI binary missing! Exiting..."
+              exit 1
+            fi
+            sleep 300
+          done
+        volumeMounts:
+        - name: cnibin
+          mountPath: /host/opt/cni/bin
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "15Mi"
+        securityContext:
+          privileged: true
+      volumes:
+      - name: cnibin
+        hostPath:
+          path: /opt/cni/bin
