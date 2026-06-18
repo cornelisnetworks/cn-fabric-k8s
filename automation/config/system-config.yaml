@@ -1,0 +1,157 @@
+---
+# System Configuration for Kubernetes Nodes
+# Defines swap, kernel modules, sysctl parameters, and firewall rules
+
+system:
+  swap:
+    disable: true
+    permanent: true
+    fstab_backup: true
+  
+  kernel_modules:
+    required:
+      - name: br_netfilter
+        description: "Bridge netfilter for iptables"
+        persist: true
+      
+      - name: overlay
+        description: "Overlay filesystem for containers"
+        persist: true
+    
+    optional:
+      - name: ip_vs
+        description: "IPVS for kube-proxy (ipvs mode)"
+        persist: true
+      
+      - name: ip_vs_rr
+        description: "IPVS round-robin scheduler"
+        persist: true
+      
+      - name: ip_vs_wrr
+        description: "IPVS weighted round-robin scheduler"
+        persist: true
+      
+      - name: ip_vs_sh
+        description: "IPVS source hashing scheduler"
+        persist: true
+      
+      - name: nf_conntrack
+        description: "Connection tracking"
+        persist: true
+  
+  sysctl:
+    parameters:
+      net.bridge.bridge-nf-call-iptables:
+        value: 1
+        description: "Enable bridge netfilter for iptables"
+      
+      net.bridge.bridge-nf-call-ip6tables:
+        value: 1
+        description: "Enable bridge netfilter for ip6tables"
+      
+      net.ipv4.ip_forward:
+        value: 1
+        description: "Enable IPv4 forwarding"
+      
+      net.ipv4.conf.all.forwarding:
+        value: 1
+        description: "Enable IPv4 forwarding on all interfaces"
+      
+      net.ipv6.conf.all.forwarding:
+        value: 1
+        description: "Enable IPv6 forwarding on all interfaces"
+    
+    config_file: "/etc/sysctl.d/k8s.conf"
+  
+  modules_config_file: "/etc/modules-load.d/k8s.conf"
+
+firewall:
+  control_plane_ports:
+    - port: 6443
+      protocol: tcp
+      description: "Kubernetes API server"
+    
+    - port: 2379
+      protocol: tcp
+      description: "etcd server client API"
+    
+    - port: 2380
+      protocol: tcp
+      description: "etcd server peer API"
+    
+    - port: 10250
+      protocol: tcp
+      description: "Kubelet API"
+    
+    - port: 10259
+      protocol: tcp
+      description: "kube-scheduler"
+    
+    - port: 10257
+      protocol: tcp
+      description: "kube-controller-manager"
+  
+  worker_ports:
+    - port: 10250
+      protocol: tcp
+      description: "Kubelet API"
+    
+    - port: 30000-32767
+      protocol: tcp
+      description: "NodePort Services"
+  
+  firewall_types:
+    - firewalld
+    - ufw
+    - iptables
+
+containerd:
+  config_file: "/etc/containerd/config.toml"
+  
+  config:
+    version: 2
+    
+    plugins:
+      "io.containerd.grpc.v1.cri":
+        systemd_cgroup: true
+        sandbox_image: "registry.k8s.io/pause:3.9"
+        
+        cni:
+          bin_dir: "/opt/cni/bin"
+          conf_dir: "/etc/cni/net.d"
+        
+        containerd:
+          runtimes:
+            runc:
+              runtime_type: "io.containerd.runc.v2"
+              options:
+                SystemdCgroup: true
+
+kubelet:
+  config_file: "/var/lib/kubelet/config.yaml"
+  
+  extra_args:
+    - "--cgroup-driver=systemd"
+    - "--container-runtime-endpoint=unix:///var/run/containerd/containerd.sock"
+  
+  # Feature gates (conditional based on workflow)
+  feature_gates:
+    DevicePluginCDIDevices: false  # Set to true for rdma-shared-device workflow
+  
+  node_labels: []
+  
+  taints: []
+
+system_requirements:
+  cpu:
+    min_cores: 2
+    description: "Minimum CPU cores required"
+  
+  memory:
+    min_mb: 2048
+    description: "Minimum memory in MB"
+  
+  disk:
+    min_gb: 20
+    description: "Minimum disk space in GB"
+    path: "/"

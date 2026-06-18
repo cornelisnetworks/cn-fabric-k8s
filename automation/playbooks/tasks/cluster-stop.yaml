@@ -1,0 +1,87 @@
+---
+- name: Create temporary directory for scripts
+  file:
+    path: /tmp/automation/scripts/lib
+    state: directory
+    mode: '0755'
+
+# Required so load-versions.sh can resolve versions from cni_artifacts: at runtime
+- name: Create temporary directory for config
+  file:
+    path: /tmp/automation/config
+    state: directory
+    mode: '0755'
+
+- name: Copy package manager library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/package-manager.sh"
+    dest: /tmp/automation/scripts/lib/package-manager.sh
+    mode: '0755'
+
+# load-versions.sh resolves K8S/Go/Multus/Flannel/CNI-plugins/Whereabouts versions
+# from package-requirements.yaml before package-manager.sh is sourced (S3 contract).
+- name: Copy load-versions library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/load-versions.sh"
+    dest: /tmp/automation/scripts/lib/load-versions.sh
+    mode: '0755'
+
+# distro-detect.sh is sourced by load-versions.sh before package-manager.sh is available
+- name: Copy distro-detect library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/distro-detect.sh"
+    dest: /tmp/automation/scripts/lib/distro-detect.sh
+    mode: '0755'
+
+- name: Copy package-requirements.yaml (versions source-of-truth)
+  copy:
+    src: "{{ playbook_dir }}/../config/package-requirements.yaml"
+    dest: /tmp/automation/config/package-requirements.yaml
+    mode: '0644'
+
+- name: Copy stop-node.sh script
+  copy:
+    src: "{{ playbook_dir }}/../scripts/stop-node.sh"
+    dest: /tmp/automation/scripts/stop-node.sh
+    mode: '0755'
+
+- name: Stop worker nodes first
+  shell: |
+    export REPO_ROOT=/tmp
+    /tmp/automation/scripts/stop-node.sh \
+      {% if not drain_before_stop %}--no-drain{% endif %} \
+      {% if delete_worker_on_stop %}--delete{% endif %} \
+      {% if force_stop %}--force{% endif %}
+  register: worker_stop_result
+  when: "'workers' in group_names"
+  changed_when: "'Node Stopped Successfully' in worker_stop_result.stdout"
+
+- name: Display worker stop output
+  debug:
+    var: worker_stop_result.stdout_lines
+  when: "'workers' in group_names"
+
+- name: Wait for workers to stop
+  pause:
+    seconds: 5
+  when: "'control_plane' in group_names"
+
+- name: Stop control plane node
+  shell: |
+    export REPO_ROOT=/tmp
+    /tmp/automation/scripts/stop-node.sh \
+      {% if not drain_before_stop %}--no-drain{% endif %} \
+      {% if force_stop %}--force{% endif %}
+  register: control_plane_stop_result
+  when: "'control_plane' in group_names"
+  changed_when: "'Node Stopped Successfully' in control_plane_stop_result.stdout"
+
+- name: Display control plane stop output
+  debug:
+    var: control_plane_stop_result.stdout_lines
+  when: "'control_plane' in group_names"
+
+- name: Clean up temporary files
+  file:
+    path: /tmp/automation
+    state: absent

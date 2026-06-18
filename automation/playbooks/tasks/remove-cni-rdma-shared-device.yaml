@@ -1,0 +1,316 @@
+---
+# Remove RDMA Shared Device Plugin
+# This task file removes all RDMA shared device plugin components
+
+- name: Assert backup_dir is defined
+  ansible.builtin.assert:
+    that:
+      - backup_dir is defined
+      - backup_dir | length > 0
+    fail_msg: "backup_dir must be passed to remove-cni-rdma-shared-device.yaml (e.g. -e backup_dir=/tmp/rdma-removal-backup)"
+
+- name: Create backup directory
+  file:
+    path: "{{ backup_dir }}"
+    state: directory
+    mode: '0755'
+  when: not dry_run_mode
+
+- name: Display backup directory
+  debug:
+    msg: "Backup directory: {{ backup_dir }}"
+  when: not dry_run_mode
+
+# ============================================================================
+# Phase 1: Backup Kubernetes Resources
+# ============================================================================
+
+- name: Phase 1 - Backup Kubernetes resources
+  debug:
+    msg: "=== Phase 1: Backing up Kubernetes resources ==="
+
+- name: Check RDMA DaemonSet exists before backup
+  ansible.builtin.shell: kubectl get daemonset rdma-shared-device-plugin -n kube-system --no-headers 2>/dev/null | wc -l
+  register: daemonset_exists_check
+  changed_when: false
+  when: not dry_run_mode
+
+- name: Set daemonset_exists fact
+  ansible.builtin.set_fact:
+    daemonset_exists: "{{ daemonset_exists_check.stdout | int > 0 }}"
+  when: not dry_run_mode
+
+- name: Backup RDMA device plugin DaemonSet
+  ansible.builtin.shell: kubectl get daemonset rdma-shared-device-plugin -n kube-system -o yaml > {{ backup_dir }}/daemonset-rdma-shared-device-plugin.yaml
+  register: backup_daemonset
+  failed_when: backup_daemonset.rc != 0 and backup_daemonset.rc != 1
+  changed_when: backup_daemonset.rc == 0
+  when: not dry_run_mode and daemonset_exists | default(false)
+
+- name: Check RDMA ConfigMap exists before backup
+  ansible.builtin.shell: kubectl get configmap rdma-cdi-device-config -n kube-system --no-headers 2>/dev/null | wc -l
+  register: configmap_exists_check
+  changed_when: false
+  when: not dry_run_mode
+
+- name: Set configmap_exists fact
+  ansible.builtin.set_fact:
+    configmap_exists: "{{ configmap_exists_check.stdout | int > 0 }}"
+  when: not dry_run_mode
+
+- name: Backup RDMA device plugin ConfigMap
+  ansible.builtin.shell: kubectl get configmap rdma-cdi-device-config -n kube-system -o yaml > {{ backup_dir }}/configmap-rdma-cdi-device-config.yaml
+  register: backup_configmap
+  failed_when: backup_configmap.rc != 0 and backup_configmap.rc != 1
+  changed_when: backup_configmap.rc == 0
+  when: not dry_run_mode and configmap_exists | default(false)
+
+- name: Backup RDMA device plugin ServiceAccount
+  ansible.builtin.shell: kubectl get serviceaccount rdma-shared-device-plugin -n kube-system -o yaml > {{ backup_dir }}/serviceaccount-rdma-shared-device-plugin.yaml
+  register: backup_serviceaccount
+  failed_when: backup_serviceaccount.rc != 0 and backup_serviceaccount.rc != 1
+  changed_when: backup_serviceaccount.rc == 0
+  when: not dry_run_mode
+
+- name: Backup RDMA device plugin ClusterRole
+  ansible.builtin.shell: kubectl get clusterrole rdma-shared-device-plugin -o yaml > {{ backup_dir }}/clusterrole-rdma-shared-device-plugin.yaml
+  register: backup_clusterrole
+  failed_when: backup_clusterrole.rc != 0 and backup_clusterrole.rc != 1
+  changed_when: backup_clusterrole.rc == 0
+  when: not dry_run_mode
+
+- name: Backup RDMA device plugin ClusterRoleBinding
+  ansible.builtin.shell: kubectl get clusterrolebinding rdma-shared-device-plugin -o yaml > {{ backup_dir }}/clusterrolebinding-rdma-shared-device-plugin.yaml
+  register: backup_clusterrolebinding
+  failed_when: backup_clusterrolebinding.rc != 0 and backup_clusterrolebinding.rc != 1
+  changed_when: backup_clusterrolebinding.rc == 0
+  when: not dry_run_mode
+
+- name: Backup Flannel DaemonSet
+  ansible.builtin.shell: kubectl get daemonset kube-flannel-ds -n kube-flannel -o yaml > {{ backup_dir }}/daemonset-kube-flannel-ds.yaml
+  register: backup_flannel_ds
+  failed_when: backup_flannel_ds.rc != 0 and backup_flannel_ds.rc != 1
+  changed_when: backup_flannel_ds.rc == 0
+  when: not dry_run_mode
+
+- name: Backup Flannel ConfigMap
+  ansible.builtin.shell: kubectl get configmap kube-flannel-cfg -n kube-flannel -o yaml > {{ backup_dir }}/configmap-kube-flannel-cfg.yaml
+  register: backup_flannel_cm
+  failed_when: backup_flannel_cm.rc != 0 and backup_flannel_cm.rc != 1
+  changed_when: backup_flannel_cm.rc == 0
+  when: not dry_run_mode
+
+- name: Backup Flannel ServiceAccount
+  ansible.builtin.shell: kubectl get serviceaccount flannel -n kube-flannel -o yaml > {{ backup_dir }}/serviceaccount-flannel.yaml
+  register: backup_flannel_sa
+  failed_when: backup_flannel_sa.rc != 0 and backup_flannel_sa.rc != 1
+  changed_when: backup_flannel_sa.rc == 0
+  when: not dry_run_mode
+
+- name: Backup Flannel ClusterRole
+  ansible.builtin.shell: kubectl get clusterrole flannel -o yaml > {{ backup_dir }}/clusterrole-flannel.yaml
+  register: backup_flannel_cr
+  failed_when: backup_flannel_cr.rc != 0 and backup_flannel_cr.rc != 1
+  changed_when: backup_flannel_cr.rc == 0
+  when: not dry_run_mode
+
+- name: Backup Flannel ClusterRoleBinding
+  ansible.builtin.shell: kubectl get clusterrolebinding flannel -o yaml > {{ backup_dir }}/clusterrolebinding-flannel.yaml
+  register: backup_flannel_crb
+  failed_when: backup_flannel_crb.rc != 0 and backup_flannel_crb.rc != 1
+  changed_when: backup_flannel_crb.rc == 0
+  when: not dry_run_mode
+
+- name: Assert all critical backups succeeded
+  ansible.builtin.assert:
+    that:
+      - backup_daemonset is succeeded or not daemonset_exists | default(false)
+      - backup_configmap is succeeded or not configmap_exists | default(false)
+    fail_msg: "One or more backups failed. Refusing to delete RDMA resources without backups."
+  when: not dry_run_mode
+
+# ============================================================================
+# Phase 2: Remove RDMA Device Plugin
+# ============================================================================
+
+- name: Phase 2 - Remove RDMA device plugin
+  debug:
+    msg: "=== Phase 2: Removing RDMA device plugin ==="
+
+- name: Remove RDMA device plugin DaemonSet
+  shell: kubectl delete daemonset rdma-shared-device-plugin -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_daemonset
+
+- name: Show DaemonSet removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete DaemonSet rdma-shared-device-plugin"
+  when: dry_run_mode
+
+- name: Remove RDMA device plugin ConfigMap
+  shell: kubectl delete configmap rdma-cdi-device-config -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_configmap
+
+- name: Show ConfigMap removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ConfigMap rdma-cdi-device-config"
+  when: dry_run_mode
+
+- name: Remove RDMA device plugin ServiceAccount
+  shell: kubectl delete serviceaccount rdma-shared-device-plugin -n kube-system --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_sa
+
+- name: Show ServiceAccount removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ServiceAccount rdma-shared-device-plugin"
+  when: dry_run_mode
+
+- name: Remove RDMA device plugin ClusterRole
+  shell: kubectl delete clusterrole rdma-shared-device-plugin --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_cr
+
+- name: Show ClusterRole removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ClusterRole rdma-shared-device-plugin"
+  when: dry_run_mode
+
+- name: Remove RDMA device plugin ClusterRoleBinding
+  shell: kubectl delete clusterrolebinding rdma-shared-device-plugin --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_crb
+
+- name: Show ClusterRoleBinding removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ClusterRoleBinding rdma-shared-device-plugin"
+  when: dry_run_mode
+
+# ============================================================================
+# Phase 3: Remove Flannel CNI
+# ============================================================================
+
+- name: Phase 3 - Remove Flannel CNI
+  debug:
+    msg: "=== Phase 3: Removing Flannel CNI ==="
+
+- name: Remove Flannel DaemonSet
+  shell: kubectl delete daemonset kube-flannel-ds -n kube-flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_flannel_ds
+
+- name: Show Flannel DaemonSet removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete DaemonSet kube-flannel-ds"
+  when: dry_run_mode
+
+- name: Remove Flannel ConfigMap
+  shell: kubectl delete configmap kube-flannel-cfg -n kube-flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_flannel_cm
+
+- name: Show Flannel ConfigMap removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ConfigMap kube-flannel-cfg"
+  when: dry_run_mode
+
+- name: Remove Flannel ServiceAccount
+  shell: kubectl delete serviceaccount flannel -n kube-flannel --ignore-not-found=true
+  when: not dry_run_mode
+  register: delete_flannel_sa
+
+- name: Show Flannel ServiceAccount removal (dry-run)
+  debug:
+    msg: "[DRY-RUN] Would delete ServiceAccount flannel"
+  when: dry_run_mode
+
+# NOTE: Flannel ClusterRole, ClusterRoleBinding, and namespace removal is intentionally
+# NOT part of this task. The RDMA shared device workflow uses Flannel as the primary
+# CNI but does NOT own Flannel's lifecycle. Removing the kube-flannel namespace from a
+# removal playbook scoped to the RDMA device plugin is too broad and breaks other
+# workflows that share Flannel.
+#
+# To remove Flannel itself, use the dedicated CNI removal flow:
+#   ansible-playbook -i automation/inventory/hosts.yaml \
+#     automation/playbooks/cni-remove.yaml -e skip_confirmation=true
+
+# ============================================================================
+# Phase 4: Verification
+# ============================================================================
+
+- name: Phase 4 - Verification
+  debug:
+    msg: "=== Phase 4: Verification ==="
+
+- name: Wait for pods to terminate
+  pause:
+    seconds: 5
+  when: not dry_run_mode
+
+- name: Check for remaining RDMA device plugin pods
+  shell: kubectl get pods -n kube-system -l app=rdma-shared-device-plugin --no-headers 2>/dev/null | wc -l
+  register: rdma_pods_count
+  changed_when: false
+  when: not dry_run_mode
+
+- name: Display RDMA pods status
+  debug:
+    msg: "{{ '✓ No RDMA device plugin pods remaining' if rdma_pods_count.stdout | int == 0 else '⚠ Found ' + rdma_pods_count.stdout + ' RDMA device plugin pods still running (may be terminating)' }}"
+  when: not dry_run_mode
+
+- name: Check for remaining Flannel pods
+  shell: kubectl get pods -n kube-flannel --no-headers 2>/dev/null | wc -l
+  register: flannel_pods_count
+  changed_when: false
+  failed_when: false
+  when: not dry_run_mode
+
+- name: Display Flannel pods status
+  debug:
+    msg: "{{ '✓ No Flannel pods remaining' if flannel_pods_count.stdout | int == 0 else '⚠ Found ' + flannel_pods_count.stdout + ' Flannel pods still running (may be terminating)' }}"
+  when: not dry_run_mode
+
+- name: Check cornelis.com/hfi resource advertisement
+  shell: kubectl get nodes -o json 2>/dev/null | jq -r '.items[].status.allocatable | select(.["cornelis.com/hfi"] != null) | .["cornelis.com/hfi"]' | wc -l
+  register: hfi_nodes_count
+  changed_when: false
+  when: not dry_run_mode
+
+- name: Display cornelis.com/hfi resource status
+  debug:
+    msg: "{{ '✓ cornelis.com/hfi resource no longer advertised' if hfi_nodes_count.stdout | int == 0 else '⚠ cornelis.com/hfi resource still advertised on ' + hfi_nodes_count.stdout + ' nodes (kubelet may need restart)' }}"
+  when: not dry_run_mode
+
+- name: Display cluster status
+  shell: kubectl get nodes -o wide
+  register: cluster_status
+  changed_when: false
+  when: not dry_run_mode
+
+- name: Show cluster status
+  debug:
+    msg: "{{ cluster_status.stdout_lines }}"
+  when: not dry_run_mode
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+- name: Removal complete
+  debug:
+    msg:
+      - "=== RDMA Shared Device Plugin Removal Complete ==="
+      - "Backup location: {{ backup_dir }}"
+      - ""
+      - "⚠ Note: Nodes will be NotReady until a new CNI is deployed"
+      - "⚠ To restore networking, deploy a CNI plugin (Flannel, Multus+IPoIB, etc.)"
+  when: not dry_run_mode
+
+- name: Dry-run summary
+  debug:
+    msg:
+      - "=== Dry-Run Complete ==="
+      - "No changes were made to the cluster"
+      - "Run without -e 'dry_run_mode=true' to perform actual removal"
+  when: dry_run_mode

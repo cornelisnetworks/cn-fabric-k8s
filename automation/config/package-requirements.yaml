@@ -1,0 +1,134 @@
+---
+# Kubernetes Package Requirements Configuration
+# Defines versions, packages, and repository URLs for node prerequisites
+
+kubernetes:
+  versions:
+    default: "1.28.5"
+    # Per-distribution overrides (applied in lib/load-versions.sh). SLES 16 kubelet
+    # 1.28.5 has an unsatisfiable `Requires: conntrack`; 1.28.14+ needs conntrack-tools
+    # (present on SLES 16), so SUSE is pinned below. Other distros use `default`.
+    overrides:
+      suse: "1.28.15"
+    supported:
+      - "1.28"
+      - "1.29"
+      - "1.30"
+
+# Single source of truth for downloaded artefacts consumed by
+# automation/scripts/setup-node.sh and automation/scripts/lib/package-manager.sh.
+# Add or update versions HERE; do not duplicate them in scripts.
+cni_artifacts:
+  go:
+    version: "1.21.5"
+  multus:
+    version: "v4.2.4"
+  flannel:
+    version: "v1.9.0-flannel1"
+  cni_plugins:
+    version: "v1.1.1"
+  whereabouts:
+    version: "v0.9.3"
+  
+  packages:
+    core:
+      - name: kubelet
+        required: true
+        version_match: true
+        description: "Kubernetes node agent"
+      
+      - name: kubeadm
+        required: true
+        version_match: true
+        description: "Kubernetes cluster initialization tool"
+      
+      - name: kubectl
+        required: control_plane
+        version_match: true
+        description: "Kubernetes command-line tool"
+    
+    container_runtime:
+      - name: containerd
+        required: true
+        min_version: "1.6.0"
+        min_version_cdi: "1.7.0"  # Required for rdma-shared-device workflow with CDI
+        alternatives: []
+        description: "Container runtime"
+    
+    dependencies:
+      - name: curl
+        required: true
+        description: "HTTP client for downloads"
+      
+      - name: wget
+        required: true
+        description: "HTTP client for downloads"
+      
+      - name: socat
+        required: true
+        description: "Socket relay for port forwarding"
+      
+      - name: conntrack
+        required: true
+        description: "Connection tracking for kube-proxy"
+      
+      - name: ipset
+        required: true
+        description: "IP set management for kube-proxy"
+      
+      - name: iptables
+        required: true
+        description: "Firewall rules for networking"
+    
+    rdma_tools:
+      - name: rdma-core
+        required: false
+        description: "RDMA userspace libraries and tools (libibverbs, ibv_devinfo)"
+      
+      - name: ibverbs-utils
+        required: false
+        description: "InfiniBand verbs utilities (ibv_devinfo, ibv_devices)"
+      
+      - name: infiniband-diags
+        required: false
+        description: "InfiniBand diagnostic tools (ibstat, ibping, iblinkinfo)"
+
+# NOTE: Repository configuration removed - assumes OS has repos pre-configured
+
+# Package name mappings for different distributions
+package_names:
+  debian:
+    containerd: "containerd"
+    curl: "curl"
+    wget: "wget"
+    socat: "socat"
+    conntrack: "conntrack"
+    ipset: "ipset"
+    iptables: "iptables"
+    rdma-core: "rdma-core"
+    ibverbs-utils: "ibverbs-utils"
+    infiniband-diags: "infiniband-diags"
+  
+  rhel:
+    containerd: "containerd.io"
+    curl: "curl"
+    wget: "wget"
+    socat: "socat"
+    conntrack: "conntrack-tools"
+    ipset: "ipset"
+    iptables: "iptables"
+    rdma-core: "rdma-core"
+    ibverbs-utils: "libibverbs-utils"
+    infiniband-diags: "infiniband-diags"
+  
+  suse:
+    containerd: "containerd"
+    curl: "curl"
+    wget: "wget"
+    socat: "socat"
+    conntrack: "conntrack-tools"
+    ipset: "ipset"
+    iptables: "iptables"
+    rdma-core: "rdma-core"
+    ibverbs-utils: "libibverbs-utils"
+    infiniband-diags: "infiniband-diags"

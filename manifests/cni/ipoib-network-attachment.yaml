@@ -1,0 +1,63 @@
+---
+# NetworkAttachmentDefinition for IPoIB secondary network
+# This manifest defines the IPoIB network configuration for Multus
+#
+# Purpose:
+#   - Define IPoIB network as a secondary network for pods
+#   - Configure IPoIB CNI with parameterized interface
+#   - Configure Whereabouts IPAM for cluster-wide IP allocation
+#   - Mode and MTU are automatically inherited from parent interface
+#
+# Template Variables:
+#   IPOIB_INTERFACE - IPoIB interface name (supply <ipoib_iface> for the
+#                     target cluster; discover with `ip link show`; see
+#                     docs/architecture/networking.md for the platform mapping)
+#   IPOIB_SUBNET    - IPoIB subnet CIDR (e.g., 192.168.100.0/24)
+#   RANGE_START     - IPAM range start (e.g., 192.168.100.10)
+#   RANGE_END       - IPAM range end (e.g., 192.168.100.254)
+#   GATEWAY         - Gateway IP (e.g., 192.168.100.1)
+#
+# Usage:
+#   1. Via deployment script (recommended):
+#      automation/scripts/deploy-multus-ipoib.sh --ipoib-interface <ipoib_iface>
+#
+#   2. Manual deployment with envsubst:
+#      export IPOIB_INTERFACE=<ipoib_iface>
+#      export IPOIB_SUBNET=192.168.100.0/24
+#      export RANGE_START=192.168.100.10
+#      export RANGE_END=192.168.100.254
+#      export GATEWAY=192.168.100.1
+#      envsubst < manifests/cni/ipoib-network-attachment.yaml | kubectl apply -f -
+#
+# Prerequisites:
+#   - Multus CNI deployed (NetworkAttachmentDefinition CRD exists)
+#   - Whereabouts IPAM deployed (manifests/cni/whereabouts-daemonset.yaml)
+#   - IPoIB CNI binary installed at /opt/cni/bin/ipoib
+#   - IPoIB interface exists on all nodes
+
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: ipoib-network
+  namespace: kube-system
+  labels:
+    app: ipoib-cni
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "ipoib-network",
+      "type": "ipoib",
+      "master": "${IPOIB_INTERFACE}",
+      "link_state": "enable",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "${IPOIB_SUBNET}",
+        "range_start": "${RANGE_START}",
+        "range_end": "${RANGE_END}",
+        "gateway": "${GATEWAY}",
+        "routes": [
+          {"dst": "${IPOIB_SUBNET}"}
+        ]
+      }
+    }

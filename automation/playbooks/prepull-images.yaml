@@ -1,0 +1,287 @@
+---
+# Pre-pull container images on all Kubernetes nodes
+#
+# This playbook pulls all required container images to reduce deployment
+# and test time by eliminating image pull delays.
+#
+# Usage:
+#   ansible-playbook -i automation/inventory/hosts.yaml \
+#     automation/playbooks/prepull-images.yaml
+#
+# Logs:
+#   - Per-node logs: /var/log/prepull-images-<hostname>.log
+#   - Summary report: Displayed at end of playbook
+#
+# Time savings:
+#   - Without pre-pull: 5-15 minutes per node (network-dependent)
+#   - With pre-pull: ~30 seconds (cached)
+#   - Net savings: ~4.5-14.5 minutes per deployment/test
+
+- name: Pre-pull container images on all nodes
+  hosts: k8s_nodes
+  become: true
+  gather_facts: true
+  
+  vars:
+    # CNI and networking images
+    cni_images:
+      - ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2
+      - ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2-thick
+      - ghcr.io/flannel-io/flannel:v0.28.1
+      - ghcr.io/flannel-io/flannel-cni-plugin:v1.9.0-flannel1
+      - docker.io/flannel/flannel:v0.25.4
+      - docker.io/flannel/flannel-cni-plugin:v1.5.1-flannel1
+      - ghcr.io/k8snetworkplumbingwg/whereabouts:v0.8.0
+    
+    # System images
+    system_images:
+      - registry.k8s.io/pause:3.9
+    
+    # Testing images
+    test_images:
+      - localhost/cornelis/rdma-test-tools:latest
+      - alpine:3.18
+      - ubuntu:22.04
+      - busybox:latest
+    
+    # Device plugin images
+    device_plugin_images:
+      - cn-rdma-shared-dev-plugin:latest
+    
+    # Combined list
+    all_images: "{{ cni_images + system_images + test_images + device_plugin_images }}"
+    
+    # Log file path
+    log_file: "/var/log/prepull-images-{{ inventory_hostname }}.log"
+  
+  tasks:
+    - name: Create log file with header
+      copy:
+        content: |
+          ==========================================
+          Image Pre-Pull Log
+          ==========================================
+          Node: {{ inventory_hostname }}
+          Date: {{ ansible_date_time.iso8601 }}
+          Images to pull: {{ all_images | length }}
+          ==========================================
+          
+        dest: "{{ log_file }}"
+        mode: '0644'
+    
+    - name: Display pre-pull summary
+      debug:
+        msg:
+          - "Pre-pulling {{ all_images | length }} container images"
+          - "Target node: {{ inventory_hostname }}"
+          - "Log file: {{ log_file }}"
+    
+    - name: Ensure containerd is running
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+      register: containerd_start
+      failed_when: false
+    
+    - name: Log containerd status
+      shell: |
+        echo "Containerd service status:" >> {{ log_file }}
+        systemctl status containerd >> {{ log_file }} 2>&1 || true
+        echo "" >> {{ log_file }}
+    
+    - name: Check crictl availability
+      command: crictl --version
+      register: crictl_check
+      failed_when: false
+      changed_when: false
+    
+    - name: Log crictl version
+      shell: |
+        echo "crictl version:" >> {{ log_file }}
+        crictl --version >> {{ log_file }} 2>&1 || echo "crictl not found" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+    
+    - name: Find containerd socket
+      shell: |
+        for sock in /run/containerd/containerd.sock /var/run/containerd/containerd.sock; do
+          if [ -S "$sock" ]; then
+            echo "$sock"
+            exit 0
+          fi
+        done
+        echo "NOT_FOUND"
+      register: containerd_socket
+      changed_when: false
+    
+    - name: Log containerd socket location
+      shell: |
+        echo "Containerd socket: {{ containerd_socket.stdout }}" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+    
+    - name: Fail if containerd not available
+      fail:
+        msg: "Containerd not available on {{ inventory_hostname }}. Socket: {{ containerd_socket.stdout }}"
+      when: containerd_socket.stdout == "NOT_FOUND"
+    
+    - name: Pre-pull images using crictl
+      shell: |
+        echo "========================================" >> {{ log_file }}
+        echo "Pulling image: {{ item }}" >> {{ log_file }}
+        echo "Time: $(date)" >> {{ log_file }}
+        echo "----------------------------------------" >> {{ log_file }}
+        crictl --runtime-endpoint unix://{{ containerd_socket.stdout }} pull {{ item }} >> {{ log_file }} 2>&1
+        RC=$?
+        echo "Exit code: $RC" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+        exit $RC
+      loop: "{{ all_images }}"
+      register: crictl_pull_result
+      failed_when: false
+      changed_when: crictl_pull_result.rc == 0
+    
+    - name: Verify images using crictl
+      shell: |
+        echo "Verifying image: {{ item }}" >> {{ log_file }}
+        crictl --runtime-endpoint unix://{{ containerd_socket.stdout }} images {{ item }} >> {{ log_file }} 2>&1
+        RC=$?
+        # Extract just the tag for matching (e.g., v4.0.2 from ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2)
+        TAG=$(echo "{{ item }}" | awk -F: '{print $NF}')
+        if [ $RC -eq 0 ] && crictl --runtime-endpoint unix://{{ containerd_socket.stdout }} images | grep -q "$TAG"; then
+          echo "✓ Image present" >> {{ log_file }}
+          echo "present"
+        else
+          echo "✗ Image missing" >> {{ log_file }}
+          echo "missing"
+        fi
+      loop: "{{ all_images }}"
+      register: crictl_verify
+      changed_when: false
+      failed_when: false
+    
+    - name: Build verification results
+      set_fact:
+        image_status: "{{ image_status | default([]) + [{'image': item.item, 'node': inventory_hostname, 'status': item.stdout | trim, 'runtime': 'crictl'}] }}"
+      loop: "{{ crictl_verify.results }}"
+      when: crictl_verify is defined
+    
+    - name: Count missing images
+      set_fact:
+        missing_count: "{{ image_status | selectattr('status', 'equalto', 'missing') | list | length }}"
+        present_count: "{{ image_status | selectattr('status', 'equalto', 'present') | list | length }}"
+      when: image_status is defined
+    
+    - name: Write summary to log
+      shell: |
+        echo "" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "SUMMARY" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "Images present: {{ present_count | default(0) }}/{{ all_images | length }}" >> {{ log_file }}
+        echo "Images missing: {{ missing_count | default(0) }}/{{ all_images | length }}" >> {{ log_file }}
+        echo "Status: {{ 'SUCCESS' if missing_count | default(0) | int == 0 else 'FAILED' }}" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+    
+    - name: Display node verification summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Node: {{ inventory_hostname }}"
+          - "=========================================="
+          - "Images present: {{ present_count | default(0) }}/{{ all_images | length }}"
+          - "Images missing: {{ missing_count | default(0) }}/{{ all_images | length }}"
+          - "Container runtime: crictl (containerd)"
+          - "Status: {{ 'SUCCESS' if missing_count | default(0) | int == 0 else 'FAILED' }}"
+          - "Log file: {{ log_file }}"
+
+- name: Generate global status report
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Collect image status from all nodes
+      set_fact:
+        all_node_status: "{{ all_node_status | default([]) + hostvars[item].image_status | default([]) }}"
+      loop: "{{ groups['k8s_nodes'] }}"
+    
+    - name: Calculate global statistics
+      set_fact:
+        total_images: "{{ hostvars[groups['k8s_nodes'][0]].all_images | length }}"
+        total_nodes: "{{ groups['k8s_nodes'] | length }}"
+        total_expected: "{{ (hostvars[groups['k8s_nodes'][0]].all_images | length) * (groups['k8s_nodes'] | length) }}"
+        total_present: "{{ all_node_status | selectattr('status', 'equalto', 'present') | list | length }}"
+        total_missing: "{{ all_node_status | selectattr('status', 'equalto', 'missing') | list | length }}"
+    
+    - name: Group missing images by node
+      set_fact:
+        missing_by_node: "{{ missing_by_node | default({}) | combine({item.node: (missing_by_node[item.node] | default([])) + [item.image]}) }}"
+      loop: "{{ all_node_status | selectattr('status', 'equalto', 'missing') | list }}"
+      when: all_node_status | selectattr('status', 'equalto', 'missing') | list | length > 0
+    
+    - name: Display global status report
+      debug:
+        msg:
+          - "=========================================="
+          - "IMAGE PRE-PULL STATUS REPORT"
+          - "=========================================="
+          - ""
+          - "Cluster Summary:"
+          - "  Total nodes: {{ total_nodes }}"
+          - "  Images per node: {{ total_images }}"
+          - "  Expected total: {{ total_expected }}"
+          - ""
+          - "Pull Results:"
+          - "  ✓ Images present: {{ total_present }}/{{ total_expected }}"
+          - "  ✗ Images missing: {{ total_missing }}/{{ total_expected }}"
+          - "  Success rate: {{ ((total_present | int / total_expected | int) * 100) | round(1) }}%"
+          - ""
+          - "Overall Status: {{ 'SUCCESS - All images available on all nodes' if total_missing | int == 0 else 'FAILED - Some images missing' }}"
+    
+    - name: Display missing images details
+      debug:
+        msg:
+          - "=========================================="
+          - "MISSING IMAGES DETAILS"
+          - "=========================================="
+          - "{{ missing_by_node | to_nice_yaml }}"
+      when: total_missing | int > 0
+    
+    - name: Display per-node status
+      debug:
+        msg:
+          - "=========================================="
+          - "PER-NODE STATUS"
+          - "=========================================="
+          - "{% for node in groups['k8s_nodes'] %}{{ node }}: {{ hostvars[node].present_count | default(0) }}/{{ total_images }} images ({{ 'OK' if hostvars[node].missing_count | default(0) | int == 0 else 'MISSING: ' + (hostvars[node].missing_count | default(0) | string) }}){% if not loop.last %}\n{% endif %}{% endfor %}"
+    
+    - name: Display next steps
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "NEXT STEPS"
+          - "=========================================="
+          - "{% if total_missing | int == 0 %}✓ All images successfully pre-pulled{% else %}✗ Re-run playbook to retry missing images{% endif %}"
+          - ""
+          - "Continue with deployment:"
+          - "  Step 3: Deploy Kubernetes Cluster"
+          - "    ansible-playbook -i automation/inventory/hosts.yaml \\"
+          - "      automation/playbooks/cluster-control.yaml \\"
+          - "      -e operation=start -e deploy_cni=none"
+    
+    - name: Display log file locations
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "LOG FILES"
+          - "=========================================="
+          - "{% for node in groups['k8s_nodes'] %}/var/log/prepull-images-{{ node }}.log{% if not loop.last %}\n{% endif %}{% endfor %}"
+          - ""
+          - "To view logs:"
+          - "  ssh <node> cat /var/log/prepull-images-<node>.log"
+    
+    - name: Fail if images are missing
+      fail:
+        msg: "Image pre-pull incomplete. {{ total_missing }} images missing across {{ missing_by_node | default({}) | length }} nodes. Check log files for details."
+      when: total_missing | int > 0

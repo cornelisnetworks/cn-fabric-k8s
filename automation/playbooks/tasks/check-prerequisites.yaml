@@ -1,0 +1,188 @@
+---
+# Check Prerequisites Tasks
+# Validates node readiness for Kubernetes cluster
+
+
+
+- name: Copy node-precheck script to nodes
+  copy:
+    src: "{{ playbook_dir }}/../scripts/node-precheck.sh"
+    dest: /tmp/node-precheck.sh
+    mode: '0755'
+
+- name: Copy test config to nodes
+  copy:
+    src: "{{ playbook_dir }}/../../tests/functional/configs/node-prerequisites-{{ platform_type }}.yaml"
+    dest: /tmp/node-precheck-config.yaml
+  when: platform_type in ['cn5000']
+
+- name: Copy minimal config if platform not specified
+  copy:
+    src: "{{ playbook_dir }}/../../tests/functional/configs/node-prerequisites-minimal.yaml"
+    dest: /tmp/node-precheck-config.yaml
+  when: platform_type not in ['cn5000']
+
+- name: Create temporary directory structure
+  file:
+    path: /tmp/automation/scripts/lib
+    state: directory
+    mode: '0755'
+
+- name: Copy package manager library to proper location
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/package-manager.sh"
+    dest: /tmp/automation/scripts/lib/package-manager.sh
+    mode: '0755'
+
+- name: Copy load-versions library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/load-versions.sh"
+    dest: /tmp/automation/scripts/lib/load-versions.sh
+    mode: '0755'
+
+- name: Copy distro-detect library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/distro-detect.sh"
+    dest: /tmp/automation/scripts/lib/distro-detect.sh
+    mode: '0755'
+
+- name: Ensure config directory exists
+  file:
+    path: /tmp/automation/config
+    state: directory
+    mode: '0755'
+
+- name: Copy package-requirements.yaml (versions source-of-truth)
+  copy:
+    src: "{{ playbook_dir }}/../config/package-requirements.yaml"
+    dest: /tmp/automation/config/package-requirements.yaml
+    mode: '0644'
+
+- name: Verify jq is installed (required by RDMA deployment verification)
+  ansible.builtin.command: jq --version
+  register: jq_check
+  changed_when: false
+  failed_when: jq_check.rc != 0
+
+- name: Display jq version
+  ansible.builtin.debug:
+    msg: "jq present: {{ jq_check.stdout }}"
+
+# Run precheck without failed_when so we always reach the stderr-surfacing debug
+# task. The block/rescue pattern guarantees the debug fires BEFORE we fail the
+# play (a failed_when on the precheck task would abort the play before the debug
+# below could execute).
+- name: Run node precheck (with stderr surfacing on failure)
+  block:
+    - name: Run node precheck
+      ansible.builtin.shell: |
+        export REPO_ROOT=/tmp
+        bash /tmp/node-precheck.sh --config /tmp/node-precheck-config.yaml --json
+      register: prereq_check
+      changed_when: false
+
+    - name: Fail if node precheck returned non-zero
+      ansible.builtin.fail:
+        msg: "node-precheck.sh exited with rc={{ prereq_check.rc }} on {{ inventory_hostname }}"
+      when: prereq_check.rc != 0
+  rescue:
+    - name: Surface node-precheck stderr on failure
+      ansible.builtin.debug:
+        msg: "{{ prereq_check.stderr_lines | default(['<no stderr captured>']) }}"
+    - name: Re-raise precheck failure after stderr is surfaced
+      ansible.builtin.fail:
+        msg: "Prerequisite check failed on {{ inventory_hostname }} (stderr shown above)."
+
+- name: Parse check results
+  set_fact:
+    check_result: "{{ prereq_check.stdout | from_json }}"
+  when: prereq_check.stdout != "" and prereq_check.rc == 0
+
+- name: Generate per-node detailed report
+  set_fact:
+    node_report: |
+      
+      ================================================================================
+      NODE: {{ inventory_hostname }}
+      ================================================================================
+      Distribution: {{ check_result.distribution.name | default('Unknown') }} {{ check_result.distribution.version | default('') }}
+      Platform: {{ check_result.platform.detected | default('auto') }}
+      Hostname: {{ check_result.hostname | default(inventory_hostname) }}
+      
+      OVERALL STATUS: {{ check_result.status | upper }}
+      ├─ Total Checks: {{ check_result.summary.total }}
+      ├─ Passed: {{ check_result.summary.passed }}
+      ├─ Failed: {{ check_result.summary.failed }}
+      └─ Warnings: {{ check_result.summary.warnings }}
+      
+      PACKAGES:
+      {% for pkg, details in (check_result.checks.packages | default({})).items() %}
+      {{ '  ✓' if details.status == 'pass' else '  ✗' }} {{ pkg | upper }}: {{ details.actual | default('not installed') }}
+      {% endfor %}
+      
+      SYSTEM CONFIGURATION:
+      {{ '  ✓' if check_result.checks.system.swap.status == 'pass' else '  ✗' }} Swap: {{ check_result.checks.system.swap.actual | default('unknown') }}
+      {% for mod, details in (check_result.checks.system.modules | default({})).items() %}
+      {{ '  ✓' if details.status == 'pass' else '  ✗' }} Kernel Module {{ mod }}: {{ 'loaded' if details.actual == 'true' or details.actual == true else 'not loaded' }}
+      {% endfor %}
+      {% for param, details in (check_result.checks.system.sysctl | default({})).items() %}
+      {{ '  ✓' if details.status == 'pass' else '  ✗' }} {{ param }}: {{ details.actual | default('not set') }}
+      {% endfor %}
+      
+      SERVICES:
+      {% for svc, details in (check_result.checks.services | default({})).items() %}
+      {{ '  ✓' if details.status == 'pass' else '  ✗' }} {{ svc }}: enabled={{ details.enabled | default(false) }}, running={{ details.running | default(false) }}
+      {% endfor %}
+      
+      {% if check_result.summary.failed > 0 %}
+      FAILURES DETECTED:
+      {% for pkg, details in (check_result.checks.packages | default({})).items() %}
+      {% if details.status != 'pass' %}
+      ✗ Package {{ pkg }}: {{ details.actual | default('not installed') }} (expected: {{ details.expected | default('any') }})
+      {% endif %}
+      {% endfor %}
+      {% for mod, details in (check_result.checks.system.modules | default({})).items() %}
+      {% if details.status != 'pass' %}
+      ✗ Module {{ mod }}: {{ details.actual | default('not loaded') }}
+      {% endif %}
+      {% endfor %}
+      {% for svc, details in (check_result.checks.services | default({})).items() %}
+      {% if details.status != 'pass' %}
+      ✗ Service {{ svc }}: enabled={{ details.enabled | default(false) }}, running={{ details.running | default(false) }}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      
+      ================================================================================
+  when: check_result is defined
+
+- name: Display per-node detailed report
+  debug:
+    msg: "{{ node_report }}"
+  when: check_result is defined
+
+- name: Display raw output if JSON parsing failed
+  debug:
+    msg: "{{ prereq_check.stdout }}"
+  when: check_result is not defined and prereq_check.stdout != ""
+
+- name: Assert prerequisite check produced a result
+  ansible.builtin.assert:
+    that:
+      - check_result is defined
+      - check_result.status is defined
+    fail_msg: "Prerequisite check did not produce a parseable result; refusing to proceed."
+
+- name: Fail if prerequisites check failed
+  fail:
+    msg: "Prerequisites check failed on {{ inventory_hostname }}: status={{ check_result.status | default('undefined') }}"
+  when: check_result is not defined or check_result.status | default('fail') != 'pass'
+
+- name: Clean up temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/node-precheck.sh
+    - /tmp/node-precheck-config.yaml
+    - /tmp/automation

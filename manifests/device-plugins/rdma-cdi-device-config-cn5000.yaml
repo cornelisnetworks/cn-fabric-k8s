@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rdma-cdi-device-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "periodicUpdateInterval": 300,
+      "configList": [
+        {
+          "resourceName": "hfi",
+          "resourcePrefix": "cornelis.com",
+          "rdmaHcaMax": 64,
+          "selectors": {
+            "vendors": ["434e"],
+            "deviceIDs": ["0001"],
+            "drivers": ["hfi1"]
+          },
+          "hfiDevices": {
+            "envVars": [
+              "FI_PROVIDER=opx"
+            ]
+          }
+        }
+      ]
+    }

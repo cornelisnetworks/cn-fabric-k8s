@@ -1,0 +1,269 @@
+---
+# Clean pre-pulled container images from all Kubernetes nodes
+#
+# This playbook removes all pre-pulled container images to free up disk space
+# or reset the environment.
+#
+# Usage:
+#   ansible-playbook -i automation/inventory/hosts.yaml \
+#     automation/playbooks/clean-images.yaml
+#
+# Options:
+#   -e clean_all=true    Remove ALL images (including system images)
+#   -e clean_all=false   Remove only pre-pulled images (default)
+
+- name: Clean container images from all nodes
+  hosts: k8s_nodes
+  become: true
+  gather_facts: true
+  
+  vars:
+    # CNI and networking images
+    cni_images:
+      - ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2
+      - ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2-thick
+      - ghcr.io/flannel-io/flannel:v0.28.1
+      - ghcr.io/flannel-io/flannel-cni-plugin:v1.9.0-flannel1
+      - docker.io/flannel/flannel:v0.25.4
+      - docker.io/flannel/flannel-cni-plugin:v1.5.1-flannel1
+      - ghcr.io/k8snetworkplumbingwg/whereabouts:v0.8.0
+    
+    # System images
+    system_images:
+      - registry.k8s.io/pause:3.9
+    
+    # Testing images
+    test_images:
+      - cornelis/rdma-test-tools:latest
+      - alpine:3.18
+      - ubuntu:22.04
+      - busybox:latest
+    
+    # Device plugin images
+    device_plugin_images:
+      - cn-rdma-shared-dev-plugin:latest
+    
+    # Combined list (excluding system images by default)
+    images_to_clean: "{{ cni_images + test_images + device_plugin_images }}"
+    
+    # Clean all images including system images
+    clean_all: false
+    
+    # Log file path
+    log_file: "/var/log/clean-images-{{ inventory_hostname }}.log"
+  
+  tasks:
+    - name: Create log file with header
+      copy:
+        content: |
+          ==========================================
+          Image Cleanup Log
+          ==========================================
+          Node: {{ inventory_hostname }}
+          Date: {{ ansible_date_time.iso8601 }}
+          Clean all: {{ clean_all }}
+          Images to remove: {{ (images_to_clean + system_images) | length if clean_all else images_to_clean | length }}
+          ==========================================
+          
+        dest: "{{ log_file }}"
+        mode: '0644'
+    
+    - name: Display cleanup summary
+      debug:
+        msg:
+          - "Cleaning container images"
+          - "Target node: {{ inventory_hostname }}"
+          - "Clean all: {{ clean_all }}"
+          - "Images to remove: {{ (images_to_clean + system_images) | length if clean_all else images_to_clean | length }}"
+          - "Log file: {{ log_file }}"
+    
+    - name: Find containerd socket
+      shell: |
+        for sock in /run/containerd/containerd.sock /var/run/containerd/containerd.sock; do
+          if [ -S "$sock" ]; then
+            echo "$sock"
+            exit 0
+          fi
+        done
+        echo "NOT_FOUND"
+      register: containerd_socket
+      changed_when: false
+    
+    - name: Log containerd socket location
+      shell: |
+        echo "Containerd socket: {{ containerd_socket.stdout }}" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+    
+    - name: Fail if containerd not available
+      fail:
+        msg: "Containerd not available on {{ inventory_hostname }}. Socket: {{ containerd_socket.stdout }}"
+      when: containerd_socket.stdout == "NOT_FOUND"
+    
+    - name: Set final image list
+      set_fact:
+        final_image_list: "{{ (images_to_clean + system_images) if clean_all else images_to_clean }}"
+    
+    - name: Remove images using crictl
+      shell: |
+        echo "========================================" >> {{ log_file }}
+        echo "Removing image: {{ item }}" >> {{ log_file }}
+        echo "Time: $(date)" >> {{ log_file }}
+        echo "----------------------------------------" >> {{ log_file }}
+        
+        # Remove image by name (crictl rmi accepts image name directly)
+        crictl --runtime-endpoint unix://{{ containerd_socket.stdout }} rmi "{{ item }}" >> {{ log_file }} 2>&1
+        RC=$?
+        
+        if [ $RC -eq 0 ]; then
+          echo "✓ Image removed successfully" >> {{ log_file }}
+          echo "removed"
+        elif grep -q "not found" {{ log_file }} 2>/dev/null; then
+          echo "Image not found, skipping" >> {{ log_file }}
+          echo "not_found"
+        else
+          echo "✗ Failed to remove image (RC: $RC)" >> {{ log_file }}
+          echo "failed"
+        fi
+        
+        echo "========================================" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+      loop: "{{ final_image_list }}"
+      register: crictl_remove_result
+      failed_when: false
+      changed_when: "'removed' in crictl_remove_result.stdout"
+    
+    - name: Count removal results
+      set_fact:
+        removed_count: "{{ crictl_remove_result.results | selectattr('stdout', 'search', 'removed') | list | length }}"
+        failed_count: "{{ crictl_remove_result.results | selectattr('stdout', 'search', 'failed') | list | length }}"
+        not_found_count: "{{ crictl_remove_result.results | selectattr('stdout', 'search', 'not_found') | list | length }}"
+    
+    - name: Write summary to log
+      shell: |
+        echo "" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "CLEANUP SUMMARY" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "Images removed: {{ removed_count }}/{{ final_image_list | length }}" >> {{ log_file }}
+        echo "Images failed: {{ failed_count }}/{{ final_image_list | length }}" >> {{ log_file }}
+        echo "Images not found: {{ not_found_count }}/{{ final_image_list | length }}" >> {{ log_file }}
+        echo "Status: {{ 'SUCCESS' if failed_count | int == 0 else 'PARTIAL' }}" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+    
+    - name: Verify images are removed
+      shell: |
+        echo "" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "POST-CLEANUP VERIFICATION" >> {{ log_file }}
+        echo "========================================" >> {{ log_file }}
+        echo "Time: $(date)" >> {{ log_file }}
+        echo "" >> {{ log_file }}
+        
+        STILL_PRESENT=0
+        {% for image in final_image_list %}
+        IMAGE_ID=$(crictl --runtime-endpoint unix://{{ containerd_socket.stdout }} images "{{ image }}" -q 2>/dev/null)
+        if [ -n "$IMAGE_ID" ]; then
+          echo "⚠ Still present: {{ image }} (ID: $IMAGE_ID)" >> {{ log_file }}
+          STILL_PRESENT=$((STILL_PRESENT + 1))
+        else
+          echo "✓ Confirmed removed: {{ image }}" >> {{ log_file }}
+        fi
+        {% endfor %}
+        
+        echo "" >> {{ log_file }}
+        echo "Images still present: $STILL_PRESENT/{{ final_image_list | length }}" >> {{ log_file }}
+        if [ $STILL_PRESENT -eq 0 ]; then
+          echo "Verification: PASSED" >> {{ log_file }}
+        else
+          echo "Verification: FAILED" >> {{ log_file }}
+        fi
+        echo "========================================" >> {{ log_file }}
+        
+        echo "$STILL_PRESENT"
+      register: verification_result
+      changed_when: false
+    
+    - name: Set verification count
+      set_fact:
+        still_present_count: "{{ verification_result.stdout | int }}"
+    
+    - name: Display node cleanup summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Node: {{ inventory_hostname }}"
+          - "=========================================="
+          - "Images removed: {{ removed_count }}/{{ final_image_list | length }}"
+          - "Images failed: {{ failed_count }}/{{ final_image_list | length }}"
+          - "Images not found: {{ not_found_count }}/{{ final_image_list | length }}"
+          - "Images still present: {{ still_present_count }}/{{ final_image_list | length }}"
+          - "Status: {{ 'SUCCESS' if (failed_count | int == 0 and still_present_count | int == 0) else 'PARTIAL' }}"
+          - "Log file: {{ log_file }}"
+
+- name: Generate global cleanup report
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Calculate global statistics
+      set_fact:
+        total_nodes: "{{ groups['k8s_nodes'] | length }}"
+        total_removed: "{{ groups['k8s_nodes'] | map('extract', hostvars, 'removed_count') | map('default', 0) | map('int') | sum }}"
+        total_failed: "{{ groups['k8s_nodes'] | map('extract', hostvars, 'failed_count') | map('default', 0) | map('int') | sum }}"
+        total_not_found: "{{ groups['k8s_nodes'] | map('extract', hostvars, 'not_found_count') | map('default', 0) | map('int') | sum }}"
+        total_still_present: "{{ groups['k8s_nodes'] | map('extract', hostvars, 'still_present_count') | map('default', 0) | map('int') | sum }}"
+    
+    - name: Display global cleanup report
+      debug:
+        msg:
+          - "=========================================="
+          - "IMAGE CLEANUP REPORT"
+          - "=========================================="
+          - ""
+          - "Cluster Summary:"
+          - "  Total nodes: {{ total_nodes }}"
+          - ""
+          - "Cleanup Results:"
+          - "  ✓ Images removed: {{ total_removed }}"
+          - "  ✗ Images failed: {{ total_failed }}"
+          - "  ⊘ Images not found: {{ total_not_found }}"
+          - ""
+          - "Verification Results:"
+          - "  ⚠ Images still present: {{ total_still_present }}"
+          - ""
+          - "Overall Status: {{ 'SUCCESS' if (total_failed | int == 0 and total_still_present | int == 0) else 'PARTIAL - Some images failed to remove or still present' }}"
+    
+    - name: Display per-node status
+      debug:
+        msg:
+          - "=========================================="
+          - "PER-NODE STATUS"
+          - "=========================================="
+          - "{% for node in groups['k8s_nodes'] %}{{ node }}: Removed {{ hostvars[node].removed_count | default(0) }}, Failed {{ hostvars[node].failed_count | default(0) }}, Not Found {{ hostvars[node].not_found_count | default(0) }}, Still Present {{ hostvars[node].still_present_count | default(0) }}{% if not loop.last %}\n{% endif %}{% endfor %}"
+    
+    - name: Display log file locations
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "LOG FILES"
+          - "=========================================="
+          - "{% for node in groups['k8s_nodes'] %}/var/log/clean-images-{{ node }}.log{% if not loop.last %}\n{% endif %}{% endfor %}"
+          - ""
+          - "To view logs:"
+          - "  ssh <node> cat /var/log/clean-images-<node>.log"
+    
+    - name: Display next steps
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "NEXT STEPS"
+          - "=========================================="
+          - "Images have been cleaned from all nodes"
+          - ""
+          - "To verify cleanup:"
+          - "  ssh <node> crictl --runtime-endpoint unix:///run/containerd/containerd.sock images"
+          - ""
+          - "To re-pull images:"
+          - "  ansible-playbook -i automation/inventory/hosts.yaml \\"
+          - "    automation/playbooks/prepull-images.yaml"

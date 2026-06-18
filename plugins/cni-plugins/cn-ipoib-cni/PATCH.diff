@@ -1,0 +1,38 @@
+diff --git a/pkg/ipoib/ipoib.go b/pkg/ipoib/ipoib.go
+index original..patched 100644
+--- a/pkg/ipoib/ipoib.go
++++ b/pkg/ipoib/ipoib.go
+@@ -73,6 +73,7 @@ func NewIpoibManager() types.Manager {
+ // CreateIpoibLink create a link in pod netns
+ func (im *ipoibManager) CreateIpoibLink(conf *types.NetConf, ifName string, netns ns.NetNS) (
+ 	*current.Interface, error) {
+ 	iface := &current.Interface{}
+ 	m, err := im.nLink.LinkByName(conf.Master)
+ 	if err != nil {
+@@ -84,6 +85,14 @@ func (im *ipoibManager) CreateIpoibLink(conf *types.NetConf, ifName string, net
+ 		return nil, err
+ 	}
+ 
++	// Get parent interface's pkey and mode
++	parentPkey := uint16(0x7fff)
++	parentMode := netlink.IPoIBMode(netlink.IPOIB_MODE_DATAGRAM)
++	if ipoibParent, ok := m.(*netlink.IPoIB); ok {
++		// Use parent's pkey and mode
++		parentPkey = ipoibParent.Pkey
++		parentMode = ipoibParent.Mode
++	}
++
+ 	ipoibLink := &netlink.IPoIB{
+ 		LinkAttrs: netlink.LinkAttrs{
+ 			Name:        tmpName,
+@@ -91,8 +100,8 @@ func (im *ipoibManager) CreateIpoibLink(conf *types.NetConf, ifName string, net
+ 			// Due to kernal bug create the link then move it to the desired namespace
+ 			//		Namespace:   netlink.NsFd(int(curNetns.Fd())),
+ 		},
+-		Pkey:   0x7fff,
+-		Mode:   netlink.IPOIB_MODE_DATAGRAM,
++		Pkey:   parentPkey,
++		Mode:   parentMode,
+ 		Umcast: 1,
+ 	}
+ 

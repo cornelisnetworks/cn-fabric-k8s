@@ -1,0 +1,143 @@
+---
+# Example: Custom Node Prerequisites Test Configuration
+# This example shows how to create a custom test config for specific requirements
+
+# Package requirements with exact versions
+packages:
+  - name: kubelet
+    version: "1.29.0"
+    required: true
+  
+  - name: kubeadm
+    version: "1.29.0"
+    required: true
+  
+  - name: kubectl
+    version: "1.29.0"
+    required: true
+  
+  - name: containerd
+    version_constraint: ">=1.7.0"
+    required: true
+  
+  # Custom package requirement
+  - name: custom-monitoring-agent
+    version_constraint: ">=2.0.0"
+    required: true
+
+# System configuration
+system:
+  swap:
+    enabled: false
+    permanent: true
+  
+  kernel_modules:
+    - name: br_netfilter
+      loaded: true
+      persistent: true
+    
+    - name: overlay
+      loaded: true
+      persistent: true
+    
+    # Additional module for IPVS mode
+    - name: ip_vs
+      loaded: true
+      persistent: true
+  
+  sysctl:
+    - parameter: net.bridge.bridge-nf-call-iptables
+      value: 1
+      persistent: true
+    
+    - parameter: net.ipv4.ip_forward
+      value: 1
+      persistent: true
+    
+    # Additional sysctl for IPv6
+    - parameter: net.ipv6.conf.all.forwarding
+      value: 1
+      persistent: true
+
+# Platform-specific requirements (CN5000 example)
+platform:
+  type: cn5000
+  
+  hardware:
+    present: true
+    pci_vendor: "434e"
+    pci_device: "0001"
+  
+  drivers:
+    - name: hfi1
+      available: true
+      loaded: true
+    
+    - name: ib_core
+      loaded: true
+    
+    - name: ib_uverbs
+      loaded: true
+    
+    - name: ib_ipoib
+      loaded: true
+    
+    - name: rdma_cm
+      loaded: true
+  
+  subsystem:
+    device_files:
+      - path: /dev/infiniband/uverbs0
+        exists: true
+      
+      - path: /dev/infiniband/rdma_cm
+        exists: true
+    
+    commands:
+      - cmd: ibstat
+        expected_output: "State: Active"
+      
+      - cmd: ibstatus
+        expected_output: "LinkUp"
+
+# Service requirements
+services:
+  - name: kubelet
+    enabled: true
+    running: false
+  
+  - name: containerd
+    enabled: true
+    running: true
+  
+  # Custom service requirement
+  - name: custom-monitoring-service
+    enabled: true
+    running: true
+
+# Optional checks (generate warnings, not failures)
+optional:
+  firewall:
+    check: true
+    ports:
+      - 10250
+      - 30000-32767
+      - 9100
+  
+  time_sync:
+    check: true
+    services: [chronyd, systemd-timesyncd, ntpd]
+  
+  network:
+    check: true
+    dns_resolution: true
+    internet_connectivity: true
+  
+  resources:
+    check: true
+    min_cpu_cores: 4
+    min_memory_mb: 8192
+    min_disk_gb: 100
+
+# Usage:
+# sudo automation/scripts/node-precheck.sh --config tests/functional/configs/custom-test-config.yaml --json

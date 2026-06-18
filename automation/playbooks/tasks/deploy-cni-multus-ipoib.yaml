@@ -1,0 +1,586 @@
+---
+# Ansible task file for deploying Multus + IPoIB dual-interface CNI
+# This task file orchestrates the deployment of:
+#   1. Flannel (host-gw) - primary CNI for control plane (eth0)
+#   2. Multus - meta-plugin for multi-interface orchestration
+#   3. Custom IPoIB CNI (cn-ipoib-cni) - secondary network for data plane (net1)
+#   4. Whereabouts IPAM - cluster-wide IP management
+#   5. NetworkAttachmentDefinition - IPoIB network configuration
+#   6. Auto-attach configuration - automatic net1 attachment
+
+- name: "Validate ipoib_interface format (security - no shell metacharacters)"
+  ansible.builtin.assert:
+    that:
+      - ipoib_interface is defined
+      - ipoib_interface is match('^[a-zA-Z][a-zA-Z0-9._-]{0,14}$')
+    fail_msg: |
+      ipoib_interface={{ ipoib_interface | default('<unset>') }} does not match the
+      allowed pattern ^[a-zA-Z][a-zA-Z0-9._-]{0,14}$. Refusing to interpolate
+      potentially malicious values into ip(8) commands (option-injection guard).
+
+- name: Validate IPoIB interface exists
+  ansible.builtin.command: ip link show dev {{ ipoib_interface }}
+  register: ipoib_check
+  failed_when: ipoib_check.rc != 0
+  changed_when: false
+
+- name: Display IPoIB interface info
+  debug:
+    msg: "IPoIB interface {{ ipoib_interface }} found and will be used for secondary network (net1)"
+
+- name: Check IPoIB interface is UP (or NO-CARRIER)
+  ansible.builtin.shell: ip link show dev {{ ipoib_interface }} | grep -qE "state (UP|DOWN)"
+  register: ipoib_state
+  failed_when: ipoib_state.rc != 0
+  changed_when: false
+
+- name: Check required kernel modules are loaded
+  shell: lsmod | grep -E '(ib_ipoib|br_netfilter)'
+  register: modules_check
+  failed_when: modules_check.rc != 0
+  changed_when: false
+
+- name: Display loaded kernel modules
+  debug:
+    msg: "Required kernel modules loaded: {{ modules_check.stdout_lines }}"
+
+- name: Check L2 connectivity for host-gw (same subnet)
+  shell: ip route | grep "{{ ansible_default_ipv4.network }}/"
+  register: l2_check
+  changed_when: false
+  failed_when: false
+
+- name: Display L2 connectivity info
+  debug:
+    msg: "L2 connectivity check: {{ 'verified' if l2_check.rc == 0 else 'skipped (nodes may be on different subnets)' }}"
+
+- name: Assert L2 connectivity for host-gw is present (all nodes on same IPoIB subnet)
+  ansible.builtin.assert:
+    that:
+      - l2_check.rc == 0
+    fail_msg: |
+      L2 connectivity check FAILED. Multus + IPoIB CNI requires Flannel host-gw,
+      which requires all nodes to share an L2 broadcast domain on the IPoIB subnet.
+      Output: {{ l2_check.stdout | default('(no output)') }}
+      To override (DO NOT USE IN PROD): set -e force_deploy_no_l2=true
+    success_msg: "L2 connectivity confirmed across all worker IPoIB interfaces"
+  when: force_deploy_no_l2 | default(false) | bool == false
+
+- name: Create temporary manifests directory
+  file:
+    path: /tmp/k8s-manifests
+    state: directory
+    mode: '0755'
+
+- name: Template Flannel host-gw manifest
+  template:
+    src: "{{ playbook_dir }}/../../manifests/cni/flannel-hostgw.yaml"
+    dest: /tmp/k8s-manifests/flannel-hostgw.yaml
+    mode: '0644'
+
+- name: Display manifest location
+  debug:
+    msg: "Flannel host-gw manifest templated to /tmp/k8s-manifests/flannel-hostgw.yaml with subnet={{ flannel_subnet }}"
+
+- name: Apply Flannel host-gw manifest
+  shell: kubectl apply -f /tmp/k8s-manifests/flannel-hostgw.yaml
+  register: flannel_apply
+  changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+
+- name: Display Flannel apply output
+  debug:
+    var: flannel_apply.stdout_lines
+
+- name: Wait for Flannel DaemonSet to be created
+  shell: kubectl get daemonset kube-flannel-ds -n kube-flannel
+  register: ds_exists
+  until: ds_exists.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
+
+- name: Wait for Flannel DaemonSet rollout
+  shell: kubectl rollout status daemonset/kube-flannel-ds -n kube-flannel --timeout=300s
+  register: rollout_status
+  changed_when: false
+
+- name: Display rollout status
+  debug:
+    var: rollout_status.stdout_lines
+
+- name: Verify Flannel pods are running
+  shell: kubectl get pods -n kube-flannel -o wide
+  register: flannel_pods
+  changed_when: false
+
+- name: Display Flannel pods
+  debug:
+    var: flannel_pods.stdout_lines
+
+# Stage the customized Multus thick DaemonSet manifest before applying.
+# This file ships with the repo (memory limits removed; see docs/deployment/multus-ipoib-cni.md#manifest-customizations).
+# It carries no Jinja2 tokens but we use `template:` for parity with the flannel-hostgw staging task above.
+- name: Template Multus thick DaemonSet manifest
+  template:
+    src: "{{ playbook_dir }}/../../manifests/cni/multus-daemonset-thick.yaml"
+    dest: /tmp/k8s-manifests/multus-daemonset-thick.yaml
+    mode: '0644'
+
+- name: Apply Multus thick deployment from local manifest (memory limits removed)
+  shell: |
+    kubectl apply -f /tmp/k8s-manifests/multus-daemonset-thick.yaml
+  register: multus_apply
+  changed_when: "'created' in multus_apply.stdout or 'configured' in multus_apply.stdout"
+
+- name: Display Multus apply output
+  debug:
+    var: multus_apply.stdout_lines
+
+- name: Wait for Multus DaemonSet to be created
+  shell: kubectl get daemonset kube-multus-ds -n kube-system
+  register: multus_ds_exists
+  until: multus_ds_exists.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
+
+- name: Wait for Multus DaemonSet rollout
+  shell: kubectl rollout status daemonset/kube-multus-ds -n kube-system --timeout=300s
+  register: multus_rollout
+  changed_when: false
+
+- name: Display Multus rollout status
+  debug:
+    var: multus_rollout.stdout_lines
+
+- name: Verify Multus pods are running
+  shell: kubectl get pods -n kube-system -l name=multus -o wide
+  register: multus_pods
+  changed_when: false
+
+- name: Display Multus pods
+  debug:
+    var: multus_pods.stdout_lines
+
+- name: Verify NetworkAttachmentDefinition CRD exists
+  shell: kubectl get crd network-attachment-definitions.k8s.cni.cncf.io
+  register: nad_crd
+  failed_when: nad_crd.rc != 0
+  changed_when: false
+
+- name: Confirm NetworkAttachmentDefinition CRD
+  debug:
+    msg: "✓ NetworkAttachmentDefinition CRD installed"
+
+- name: Verify required CNI binaries are installed
+  stat:
+    path: "{{ item }}"
+  register: cni_binary_precheck
+  loop:
+    - /opt/cni/bin/ipoib
+    - /opt/cni/bin/multus
+    - /opt/cni/bin/flannel
+    - /opt/cni/bin/host-local
+  loop_control:
+    label: "{{ item }}"
+
+- name: Check for missing CNI binaries
+  fail:
+    msg: |
+      ERROR: Required CNI binary not found or not executable: {{ item.item }}
+      
+      This binary should have been installed during node setup (Step 1).
+      
+      To fix this issue:
+      1. Re-run node setup: ansible-playbook -i inventory/hosts.yaml setup-cluster.yaml -e "operation=setup"
+      2. Or manually install CNI binaries on all nodes
+      
+      See docs/deployment/cni-binary-installation.md for details.
+  when: not item.stat.exists or not item.stat.executable
+  loop: "{{ cni_binary_precheck.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Confirm CNI binaries are pre-installed
+  debug:
+    msg: "✓ All required CNI binaries verified (installed during node setup)"
+
+- name: Stage CNI binaries (allowlist only)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    STAGE=/var/lib/cn-fabric-k8s/cni-stage.$$
+    mkdir -p "$STAGE"
+    ALLOWLIST=(ipoib multus flannel host-local loopback bridge portmap bandwidth)
+    for bin in "${ALLOWLIST[@]}"; do
+        if [ -x "/opt/cni/bin/$bin" ]; then
+            cp -a "/opt/cni/bin/$bin" "$STAGE/$bin"
+        else
+            echo "WARNING: /opt/cni/bin/$bin missing or non-exec; skipping" >&2
+        fi
+    done
+    echo "$STAGE"
+  args:
+    executable: /bin/bash
+  register: stage_dir
+  changed_when: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_nodes'] }}"
+
+- name: Ensure Multus chroot CNI bin directory exists
+  ansible.builtin.file:
+    path: /hostroot/opt/cni/bin
+    state: directory
+    mode: '0755'
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_nodes'] }}"
+
+- name: Atomic swap of CNI binaries into Multus chroot
+  ansible.builtin.shell: |
+    set -euo pipefail
+    SRC="{{ item.stdout }}"
+    DST=/hostroot/opt/cni/bin
+    DST_OLD="${DST}.old.$$"
+    DST_NEW="${DST}.new.$$"
+    cp -a "$SRC" "$DST_NEW"
+    [ -d "$DST" ] && mv "$DST" "$DST_OLD"
+    mv "$DST_NEW" "$DST"
+    rm -rf "$DST_OLD"
+    rm -rf "$SRC"
+  args:
+    executable: /bin/bash
+  changed_when: true
+  delegate_to: "{{ item.item }}"
+  loop: "{{ stage_dir.results }}"
+
+- name: Template Custom IPoIB CNI DaemonSet manifest
+  template:
+    src: "{{ playbook_dir }}/../../manifests/cni/ipoib-cni-daemonset.yaml"
+    dest: /tmp/k8s-manifests/ipoib-cni-daemonset.yaml
+    mode: '0644'
+
+- name: Apply Custom IPoIB CNI DaemonSet manifest
+  shell: kubectl apply -f /tmp/k8s-manifests/ipoib-cni-daemonset.yaml
+  register: ipoib_apply
+  changed_when: "'created' in ipoib_apply.stdout or 'configured' in ipoib_apply.stdout"
+
+- name: Display Custom IPoIB CNI apply output
+  debug:
+    var: ipoib_apply.stdout_lines
+
+- name: Wait for Custom IPoIB CNI DaemonSet to be created
+  shell: kubectl get daemonset ipoib-cni -n kube-system
+  register: ipoib_ds_exists
+  until: ipoib_ds_exists.rc == 0
+  retries: 10
+  delay: 3
+  changed_when: false
+
+- name: Wait for Custom IPoIB CNI deployment to complete
+  shell: kubectl rollout status daemonset/ipoib-cni -n kube-system --timeout=300s
+  register: ipoib_rollout
+  changed_when: false
+
+- name: Display Custom IPoIB CNI rollout status
+  debug:
+    var: ipoib_rollout.stdout_lines
+
+- name: Verify Custom IPoIB CNI pods are running
+  shell: kubectl get pods -n kube-system -l app=ipoib-cni -o wide
+  register: ipoib_pods
+  changed_when: false
+
+- name: Display Custom IPoIB CNI pods
+  debug:
+    var: ipoib_pods.stdout_lines
+
+- name: Verify Custom IPoIB CNI binary installed on nodes
+  stat:
+    path: /opt/cni/bin/ipoib
+  register: ipoib_binary_check
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_nodes'] }}"
+  changed_when: false
+
+- name: Confirm Custom IPoIB CNI binary
+  debug:
+    msg: "✓ Custom IPoIB CNI binary installed on all nodes at /opt/cni/bin/ipoib"
+
+# Whereabouts CRDs vendored under manifests/cni/whereabouts/ for air-gap support.
+# Apply one CRD per task so Ansible captures every failure individually (a chained
+# shell would hide any non-final kubectl-apply exit code), and run only on the first
+# control-plane host to avoid multi-master double-apply.
+- name: Stage vendored Whereabouts CRDs on control plane
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../manifests/cni/whereabouts/{{ item }}"
+    dest: "/tmp/k8s-manifests/whereabouts-{{ item }}"
+    mode: '0644'
+  loop:
+    - ippools.yaml
+    - overlappingrangeipreservations.yaml
+  run_once: true
+
+- name: Deploy Whereabouts ippools CRD (vendored v0.9.3)
+  ansible.builtin.command: kubectl apply -f /tmp/k8s-manifests/whereabouts-ippools.yaml
+  register: whereabouts_ippools_apply
+  changed_when: "'created' in whereabouts_ippools_apply.stdout or 'configured' in whereabouts_ippools_apply.stdout"
+  run_once: true
+
+- name: Deploy Whereabouts overlappingrangeipreservations CRD (vendored v0.9.3)
+  ansible.builtin.command: kubectl apply -f /tmp/k8s-manifests/whereabouts-overlappingrangeipreservations.yaml
+  register: whereabouts_orir_apply
+  changed_when: "'created' in whereabouts_orir_apply.stdout or 'configured' in whereabouts_orir_apply.stdout"
+  run_once: true
+
+- name: Display Whereabouts CRD deployment output
+  debug:
+    msg: |
+      ippools: {{ whereabouts_ippools_apply.stdout_lines | default([]) }}
+      overlappingrangeipreservations: {{ whereabouts_orir_apply.stdout_lines | default([]) }}
+  run_once: true
+
+- name: Wait for Whereabouts CRDs to be established
+  ansible.builtin.command: kubectl wait --for condition=established --timeout=60s crd/ippools.whereabouts.cni.cncf.io crd/overlappingrangeipreservations.whereabouts.cni.cncf.io
+  register: whereabouts_crd_wait
+  changed_when: false
+  run_once: true
+
+- name: Copy Whereabouts IPAM manifest to control plane
+  copy:
+    src: "{{ playbook_dir }}/../../manifests/cni/whereabouts-daemonset.yaml"
+    dest: /tmp/k8s-manifests/whereabouts-daemonset.yaml
+    mode: '0644'
+
+- name: Deploy Whereabouts IPAM for cluster-wide IP management
+  shell: kubectl apply -f /tmp/k8s-manifests/whereabouts-daemonset.yaml
+  register: whereabouts_apply
+  changed_when: "'created' in whereabouts_apply.stdout or 'configured' in whereabouts_apply.stdout"
+
+- name: Display Whereabouts apply output
+  debug:
+    var: whereabouts_apply.stdout_lines
+
+- name: Wait for Whereabouts DaemonSet rollout
+  shell: kubectl rollout status daemonset/whereabouts -n kube-system --timeout=300s
+  register: whereabouts_rollout
+  changed_when: false
+
+- name: Verify Whereabouts pods are running
+  shell: kubectl get pods -n kube-system -l app=whereabouts -o wide
+  register: whereabouts_pods
+  changed_when: false
+
+- name: Display Whereabouts pods
+  debug:
+    var: whereabouts_pods.stdout_lines
+
+- name: Confirm Whereabouts IPAM
+  debug:
+    msg: "✓ Whereabouts IPAM deployed for cluster-wide IP allocation"
+
+- name: Copy Whereabouts binary to Multus thick chroot path on all nodes (atomic swap)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    src=/opt/cni/bin/whereabouts
+    dst=/hostroot/opt/cni/bin/whereabouts
+    tmp="${dst}.staging.$$"
+    cp "$src" "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$dst"
+  args:
+    executable: /bin/bash
+  changed_when: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['k8s_nodes'] }}"
+
+- name: Validate ipoib_subnet is a /24 CIDR (current limitation)
+  ansible.builtin.assert:
+    that:
+      - ipoib_subnet | ipaddr('prefix') == 24
+    fail_msg: "ipoib_subnet '{{ ipoib_subnet }}' must be a /24 CIDR. Non-/24 subnets are not yet supported."
+    success_msg: "ipoib_subnet '{{ ipoib_subnet }}' is a valid /24 CIDR"
+
+- name: Calculate IPAM range start and end from /24 subnet
+  ansible.builtin.set_fact:
+    ipam_range_start: "{{ ipoib_subnet | ipaddr('network') | ipaddr('1') | ipaddr('address') }}"
+    ipam_range_end:   "{{ ipoib_subnet | ipaddr('network') | ipaddr('254') | ipaddr('address') }}"
+    subnet_prefix:    "{{ ipoib_subnet | ipaddr('network') | regex_replace('\\.0$', '') }}"
+
+- name: Set IPAM range variables
+  set_fact:
+    range_start: "{{ subnet_prefix }}.10"
+    range_end: "{{ subnet_prefix }}.254"
+    gateway: "{{ subnet_prefix }}.1"
+
+- name: Template IPoIB NetworkAttachmentDefinition manifest
+  template:
+    src: "{{ playbook_dir }}/../../manifests/cni/ipoib-network-attachment.yaml"
+    dest: /tmp/k8s-manifests/ipoib-network-attachment.yaml.template
+    mode: '0644'
+
+- name: Substitute environment variables in NetworkAttachmentDefinition
+  shell: |
+    export IPOIB_INTERFACE="{{ ipoib_interface }}"
+    export IPOIB_SUBNET="{{ ipoib_subnet }}"
+    export RANGE_START="{{ range_start }}"
+    export RANGE_END="{{ range_end }}"
+    export GATEWAY="{{ gateway }}"
+    envsubst < /tmp/k8s-manifests/ipoib-network-attachment.yaml.template > /tmp/k8s-manifests/ipoib-network-attachment.yaml
+  changed_when: false
+
+- name: Apply IPoIB NetworkAttachmentDefinition
+  shell: kubectl apply -f /tmp/k8s-manifests/ipoib-network-attachment.yaml
+  register: nad_apply
+  changed_when: "'created' in nad_apply.stdout or 'configured' in nad_apply.stdout"
+
+- name: Display NetworkAttachmentDefinition apply output
+  debug:
+    var: nad_apply.stdout_lines
+
+- name: Verify NetworkAttachmentDefinition created
+  shell: kubectl get network-attachment-definitions.k8s.cni.cncf.io ipoib-network -n kube-system
+  register: nad_verify
+  failed_when: nad_verify.rc != 0
+  changed_when: false
+
+- name: Confirm NetworkAttachmentDefinition
+  debug:
+    msg: "✓ NetworkAttachmentDefinition 'ipoib-network' created in kube-system namespace"
+
+- name: Copy Multus default config to control plane
+  copy:
+    src: "{{ playbook_dir }}/../../manifests/cni/multus-default-config.yaml"
+    dest: /tmp/k8s-manifests/multus-default-config.yaml
+    mode: '0644'
+
+- name: Apply Multus default networks configuration
+  shell: kubectl apply -f /tmp/k8s-manifests/multus-default-config.yaml
+  register: default_config_apply
+  changed_when: "'created' in default_config_apply.stdout or 'configured' in default_config_apply.stdout"
+
+- name: Display default networks config apply output
+  debug:
+    var: default_config_apply.stdout_lines
+
+- name: Wait for nodes to become Ready
+  shell: kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | grep -o True | wc -l
+  register: ready_nodes
+  until: ready_nodes.stdout | int >= (groups['k8s_nodes'] | length)
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Get final node status
+  shell: kubectl get nodes -o wide
+  register: final_nodes
+  changed_when: false
+
+- name: Display final node status
+  debug:
+    var: final_nodes.stdout_lines
+
+- name: Remove stale test-multus-verify pod if any
+  shell: kubectl delete pod test-multus-verify --ignore-not-found --force --grace-period=0 2>/dev/null || true
+  changed_when: false
+
+- name: Create test pod to verify dual interfaces
+  shell: |
+    cat <<'EOF' | kubectl create -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: test-multus-verify
+      annotations:
+        k8s.v1.cni.cncf.io/networks: kube-system/ipoib-network
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: alpine:3.18
+          command: ["sleep", "60"]
+    EOF
+  register: test_pod_create
+  changed_when: true
+  failed_when: test_pod_create.rc != 0
+
+- name: Wait for test pod to be ready
+  shell: kubectl wait --for=condition=ready pod/test-multus-verify --timeout=60s
+  register: test_pod_ready
+  changed_when: false
+  failed_when: test_pod_ready.rc != 0
+
+- name: Check test pod interfaces
+  shell: kubectl exec test-multus-verify -- ip addr show
+  register: test_pod_interfaces
+  changed_when: false
+  failed_when: test_pod_interfaces.rc != 0
+
+- name: Display test pod interfaces
+  debug:
+    var: test_pod_interfaces.stdout_lines
+  when: test_pod_interfaces.rc == 0
+
+- name: Verify test pod has eth0 interface
+  shell: kubectl exec test-multus-verify -- ip link show eth0
+  register: test_pod_eth0_check
+  changed_when: false
+  failed_when: test_pod_eth0_check.rc != 0
+
+- name: Verify test pod has net1 interface
+  shell: kubectl exec test-multus-verify -- ip link show net1
+  register: test_pod_net1_check
+  changed_when: false
+  failed_when: test_pod_net1_check.rc != 0
+
+- name: Assert test pods have both eth0 AND net1 interfaces
+  ansible.builtin.assert:
+    that:
+      - test_pod_eth0_check is succeeded
+      - test_pod_net1_check is succeeded
+    fail_msg: |
+      Multus dual-interface validation FAILED. Pods do not have the expected
+      eth0 (Flannel) + net1 (IPoIB CNI) interface pair. Common causes:
+        - IPoIB CNI binary missing at /opt/cni/bin/ipoib on one or more nodes
+        - NetworkAttachmentDefinition 'ipoib-network-attachment' not applied
+        - Whereabouts IPAM has run out of addresses
+      Inspect: kubectl describe pod <test-pod>
+      Inspect: kubectl exec <test-pod> -- ip -br addr
+      kubectl logs -n kube-system -l app=multus
+    success_msg: "All test pods have eth0 + net1 dual interfaces"
+
+- name: Delete test pod
+  shell: kubectl delete pod test-multus-verify --force --grace-period=0
+  register: test_pod_delete
+  changed_when: true
+  failed_when: test_pod_delete.rc != 0
+
+- name: Display deployment summary
+  debug:
+    msg:
+      - "=========================================="
+      - "Multus + IPoIB Dual-Interface CNI Deployment Complete"
+      - "=========================================="
+      - "Control Plane Network (eth0):"
+      - "  CNI: Flannel (host-gw)"
+      - "  Subnet: {{ flannel_subnet }}"
+      - ""
+      - "Data Plane Network (net1):"
+      - "  CNI: IPoIB (native)"
+      - "  Interface: {{ ipoib_interface }}"
+      - "  Subnet: {{ ipoib_subnet }}"
+      - "  Mode: {{ ipoib_mode }}"
+      - "  MTU: {{ ipoib_mtu }}"
+      - ""
+      - "Nodes Ready: {{ ready_nodes.stdout }}/{{ groups['k8s_nodes'] | length }}"
+      - ""
+      - "Verification commands:"
+      - "  kubectl get nodes"
+      - "  kubectl get pods -n kube-flannel"
+      - "  kubectl get pods -n kube-system -l app=multus"
+      - "  kubectl get pods -n kube-system -l app=ipoib-cni"
+      - "  kubectl get pods -n kube-system -l app=whereabouts"
+      - "  kubectl get network-attachment-definitions.k8s.cni.cncf.io -A"
+      - ""
+      - "Test deployment:"
+      - "  tests/02-verify-multus-ipoib.sh --quick"
+      - ""
+      - "See docs/deployment/multus-ipoib-cni.md for details and troubleshooting"

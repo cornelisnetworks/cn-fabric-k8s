@@ -1,0 +1,121 @@
+---
+- name: Create temporary directory for scripts
+  file:
+    path: /tmp/automation/scripts/lib
+    state: directory
+    mode: '0755'
+
+- name: Copy package manager library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/package-manager.sh"
+    dest: /tmp/automation/scripts/lib/package-manager.sh
+    mode: '0755'
+
+- name: Copy load-versions library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/load-versions.sh"
+    dest: /tmp/automation/scripts/lib/load-versions.sh
+    mode: '0755'
+
+# distro-detect.sh is sourced by load-versions.sh before package-manager.sh is available
+- name: Copy distro-detect library
+  copy:
+    src: "{{ playbook_dir }}/../scripts/lib/distro-detect.sh"
+    dest: /tmp/automation/scripts/lib/distro-detect.sh
+    mode: '0755'
+
+- name: Ensure config directory exists
+  file:
+    path: /tmp/automation/config
+    state: directory
+    mode: '0755'
+
+- name: Copy package-requirements.yaml (versions source-of-truth)
+  copy:
+    src: "{{ playbook_dir }}/../config/package-requirements.yaml"
+    dest: /tmp/automation/config/package-requirements.yaml
+    mode: '0644'
+
+- name: Copy start-control-plane.sh script
+  copy:
+    src: "{{ playbook_dir }}/../scripts/start-control-plane.sh"
+    dest: /tmp/automation/scripts/start-control-plane.sh
+    mode: '0755'
+  when: "'control_plane' in group_names"
+
+- name: Copy start-worker.sh script
+  copy:
+    src: "{{ playbook_dir }}/../scripts/start-worker.sh"
+    dest: /tmp/automation/scripts/start-worker.sh
+    mode: '0755'
+  when: "'workers' in group_names"
+
+- name: Start control plane node
+  shell: |
+    export REPO_ROOT=/tmp
+    /tmp/automation/scripts/start-control-plane.sh \
+      --pod-network-cidr {{ pod_network_cidr }} \
+      --service-cidr {{ service_cidr }} \
+      {% if skip_worker_taint %}--skip-worker-taint{% else %}--no-skip-worker-taint{% endif %}
+  register: control_plane_start_result
+  when: "'control_plane' in group_names"
+  changed_when: "'Control Plane Started Successfully' in control_plane_start_result.stdout"
+
+- name: Display control plane start output
+  debug:
+    var: control_plane_start_result.stdout_lines
+  when: "'control_plane' in group_names"
+
+- name: Get join command from control plane
+  shell: kubeadm token create --print-join-command
+  register: join_command_result
+  when: "'control_plane' in group_names"
+  changed_when: false
+
+- name: Set join command as fact
+  set_fact:
+    k8s_join_command: "{{ join_command_result.stdout }}"
+  when: 
+    - "'control_plane' in group_names"
+    - join_command_result.stdout is defined
+
+- name: Wait for control plane to be ready
+  pause:
+    seconds: 10
+  run_once: true
+
+- name: Start worker nodes
+  shell: |
+    export REPO_ROOT=/tmp
+    /tmp/automation/scripts/start-worker.sh --join-command "{{ hostvars[groups['control_plane'][0]].k8s_join_command }}"
+  register: worker_start_result
+  when: "'workers' in group_names"
+  changed_when: "'Worker Node Joined Successfully' in worker_start_result.stdout"
+
+- name: Display worker start output
+  debug:
+    var: worker_start_result.stdout_lines
+  when: "'workers' in group_names"
+
+- name: Deploy CNI plugin (Flannel IPoIB)
+  include_tasks: deploy-cni-flannel-ipoib.yaml
+  when:
+    - "'control_plane' in group_names"
+    - deploy_cni == "flannel-ipoib"
+
+- name: Deploy CNI plugin (Multus IPoIB)
+  include_tasks: deploy-cni-multus-ipoib.yaml
+  when:
+    - "'control_plane' in group_names"
+    - deploy_cni == "multus-ipoib"
+
+- name: Deploy CNI plugin (RDMA Shared Device)
+  include_tasks: deploy-cni-rdma-shared-device.yaml
+  when:
+    - "'control_plane' in group_names"
+    - deploy_cni == "rdma-shared-device"
+
+- name: Clean up temporary files
+  file:
+    path: /tmp/automation
+    state: absent

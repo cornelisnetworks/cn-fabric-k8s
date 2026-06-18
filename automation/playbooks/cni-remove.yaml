@@ -1,0 +1,162 @@
+---
+- name: Remove CNI Components from Kubernetes Cluster
+  hosts: control_plane
+  become: true
+  gather_facts: true
+  
+  vars:
+    # Safe by default: deletes run only with explicit -e dry_run_mode=false.
+    # Computed (not literal) so an inventory-set dry_run_mode is not shadowed.
+    effective_dry_run: "{{ dry_run_mode | default(true) | bool }}"
+    effective_skip_confirmation: "{{ skip_confirmation | default(false) | bool }}"
+  
+  tasks:
+    - name: Display removal plan
+      debug:
+        msg:
+          - "=== CNI Removal Plan ==="
+          - "Remove Multus: yes"
+          - "Remove IPoIB CNI: yes"
+          - "Remove Whereabouts: yes"
+          - "Remove Flannel: yes"
+          - "Dry Run Mode: {{ effective_dry_run }}"
+          - ""
+          - "WARNING: After removal, nodes will become NotReady (no CNI available)"
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Confirm removal (unless skip_confirmation=true)
+      pause:
+        prompt: "This will remove ALL CNI components from the cluster. Continue? (yes/no)"
+      register: confirm
+      when: not effective_skip_confirmation and not effective_dry_run
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Validate confirmation
+      assert:
+        that: confirm.user_input | default('yes') == 'yes'
+        fail_msg: "Removal cancelled by user"
+      when: not effective_skip_confirmation and not effective_dry_run
+      run_once: true
+      delegate_to: localhost
+    
+    - name: Check if cluster is accessible
+      shell: kubectl cluster-info
+      register: cluster_check
+      failed_when: cluster_check.rc != 0
+      changed_when: false
+      run_once: true
+    
+    - name: Display cluster info
+      debug:
+        msg: "Cluster is accessible and ready for CNI removal"
+      run_once: true
+    
+    - name: Remove CNI components
+      include_tasks: tasks/remove-cni-multus-ipoib.yaml
+    
+    - name: Generate final summary
+      debug:
+        msg:
+          - "=== CNI Removal Operation Complete ==="
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+          - ""
+          - "All CNI components have been removed from the cluster."
+          - "Nodes are now NotReady (no CNI available)."
+          - ""
+          - "To restore networking, deploy a new CNI plugin."
+      run_once: true
+      delegate_to: localhost
+
+# The control_plane play leaves flannel.1 + /run/flannel/subnet.env behind;
+# flannel-ipoib hostPath-mounts /run/flannel, so redeploy reads stale state and CrashLoops.
+- name: Clean stale Flannel/CNI host state on all nodes
+  hosts: k8s_nodes
+  become: true
+  gather_facts: false
+
+  vars:
+    effective_dry_run: "{{ dry_run_mode | default(true) | bool }}"
+
+  tasks:
+    - name: Display stale-state cleanup plan
+      debug:
+        msg:
+          - "=== Stale Flannel/CNI Host-State Cleanup ==="
+          - "Target host: {{ inventory_hostname }}"
+          - "Will remove: /run/flannel/subnet.env, /run/flannel/, /etc/cni/net.d/10-flannel.conflist, flannel.1, cni0"
+          - "Dry Run Mode: {{ effective_dry_run }}"
+
+    # Critical fix runs FIRST: clearing /run/flannel is what unblocks
+    # redeploy, so it must never be skipped by a failure in best-effort device
+    # cleanup below.
+    - name: Remove stale Flannel runtime state
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /run/flannel/subnet.env
+        - /run/flannel
+      when: not effective_dry_run
+
+    - name: Display Flannel runtime state cleanup status
+      debug:
+        msg: >-
+          {{ 'DRY RUN: Would remove /run/flannel/subnet.env and /run/flannel/ on ' + inventory_hostname
+             if effective_dry_run
+             else 'Removed stale /run/flannel state on ' + inventory_hostname }}
+
+    - name: Remove leftover Flannel CNI config on all nodes
+      file:
+        path: /etc/cni/net.d/10-flannel.conflist
+        state: absent
+      when: not effective_dry_run
+
+    - name: Display Flannel CNI config cleanup status
+      debug:
+        msg: >-
+          {{ 'DRY RUN: Would remove /etc/cni/net.d/10-flannel.conflist on ' + inventory_hostname
+             if effective_dry_run
+             else 'Removed leftover Flannel CNI config on ' + inventory_hostname }}
+
+    # Best-effort: leftover flannel.1/cni0 are cosmetic once /run/flannel is gone.
+    # kube-ipvs0 is intentionally excluded: it is a kube-proxy IPVS dummy holding
+    # Service VIPs, not a Flannel artifact. The rescue keeps any delete failure
+    # (device busy, unsupported) from failing the host and dropping the fix above.
+    - name: Remove stale Flannel/CNI network devices (best-effort)
+      block:
+        - name: Delete leftover Flannel/CNI link devices
+          command: "ip link delete {{ item }}"
+          loop:
+            - flannel.1
+            - cni0
+          register: link_delete
+          failed_when:
+            - link_delete.rc != 0
+            - '"Cannot find device" not in link_delete.stderr'
+          changed_when: link_delete.rc == 0
+          when: not effective_dry_run
+
+        - name: Report per-device cleanup status
+          debug:
+            msg: >-
+              Device {{ item.item }}:
+              {{ 'deleted' if item.changed else 'already absent' }}
+          loop: "{{ link_delete.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item | default('n/a') }}"
+          when: not effective_dry_run
+      rescue:
+        - name: Warn that best-effort device cleanup failed
+          debug:
+            msg: >-
+              WARNING: Could not delete one or more leftover network devices on
+              {{ inventory_hostname }}. Critical /run/flannel state was already
+              cleared, so redeploy will still succeed. Remove the device manually
+              if it persists. Details: {{ ansible_failed_result.msg | default('see task output') }}
+
+    - name: Display network device cleanup status (dry run)
+      debug:
+        msg: "DRY RUN: Would delete flannel.1, cni0 on {{ inventory_hostname }}"
+      when: effective_dry_run

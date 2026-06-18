@@ -1,0 +1,102 @@
+---
+# Alternative: DaemonSet-based image pre-pull
+#
+# This creates a Kubernetes DaemonSet that pulls images on all nodes.
+# Useful when you have kubectl access but not direct SSH access to nodes.
+#
+# Usage:
+#   kubectl apply -f automation/playbooks/prepull-images-daemonset.yaml
+#   kubectl wait --for=condition=ready pod -l name=image-prepull -n kube-system --timeout=600s
+#   kubectl delete -f automation/playbooks/prepull-images-daemonset.yaml
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: image-prepull
+  namespace: kube-system
+  labels:
+    app: image-prepull
+spec:
+  selector:
+    matchLabels:
+      name: image-prepull
+  template:
+    metadata:
+      labels:
+        name: image-prepull
+    spec:
+      # Run on all nodes including control plane
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      
+      # Pull images sequentially via init containers
+      initContainers:
+      # CNI images
+      - name: pull-multus-v4-0-2
+        image: ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2
+        command: ['sh', '-c', 'echo "Pulled multus-cni:v4.0.2"']
+      
+      - name: pull-multus-v4-0-2-thick
+        image: ghcr.io/k8snetworkplumbingwg/multus-cni:v4.0.2-thick
+        command: ['sh', '-c', 'echo "Pulled multus-cni:v4.0.2-thick"']
+      
+      - name: pull-flannel-v0-28-1
+        image: ghcr.io/flannel-io/flannel:v0.28.1
+        command: ['sh', '-c', 'echo "Pulled flannel:v0.28.1"']
+      
+      - name: pull-flannel-cni-v1-9-0
+        image: ghcr.io/flannel-io/flannel-cni-plugin:v1.9.0-flannel1
+        command: ['sh', '-c', 'echo "Pulled flannel-cni-plugin:v1.9.0-flannel1"']
+      
+      - name: pull-flannel-v0-25-4
+        image: docker.io/flannel/flannel:v0.25.4
+        command: ['sh', '-c', 'echo "Pulled flannel:v0.25.4"']
+      
+      - name: pull-flannel-cni-v1-5-1
+        image: docker.io/flannel/flannel-cni-plugin:v1.5.1-flannel1
+        command: ['sh', '-c', 'echo "Pulled flannel-cni-plugin:v1.5.1-flannel1"']
+      
+      - name: pull-whereabouts
+        image: ghcr.io/k8snetworkplumbingwg/whereabouts:v0.8.0
+        command: ['sh', '-c', 'echo "Pulled whereabouts:v0.8.0"']
+      
+      # Device plugin
+      - name: pull-rdma-device-plugin
+        image: cn-rdma-shared-dev-plugin:latest
+        command: ['sh', '-c', 'echo "Pulled cn-rdma-shared-dev-plugin:latest"']
+      
+      # Test images
+      - name: pull-rdma-test-tools
+        image: cornelis/rdma-test-tools:latest
+        command: ['sh', '-c', 'echo "Pulled rdma-test-tools:latest"']
+      
+      - name: pull-alpine
+        image: alpine:3.18
+        command: ['sh', '-c', 'echo "Pulled alpine:3.18"']
+      
+      - name: pull-ubuntu
+        image: ubuntu:22.04
+        command: ['sh', '-c', 'echo "Pulled ubuntu:22.04"']
+      
+      - name: pull-busybox
+        image: busybox:latest
+        command: ['sh', '-c', 'echo "Pulled busybox:latest"']
+      
+      # Main container (uses pause to keep pod running briefly)
+      containers:
+      - name: complete
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 10m
+            memory: 16Mi
+      
+      # Clean up after 5 minutes
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 10

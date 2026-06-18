@@ -1,0 +1,87 @@
+---
+# Node Prerequisites Test Configuration Schema
+# Documentation for creating test configuration files
+
+# This file documents the schema for node prerequisites test configurations.
+# It is not used by the scripts, but serves as reference documentation.
+
+schema_version: "1.0"
+
+# Package requirements
+packages:
+  - name: string                    # Package name (required)
+    version: string                 # Exact version (optional)
+    version_constraint: string      # Version constraint like ">=1.28.0" (optional)
+    required: boolean               # Whether package is required (default: true)
+
+# System configuration requirements
+system:
+  swap:
+    enabled: boolean                # Expected swap state (true=enabled, false=disabled)
+    permanent: boolean              # Whether swap should be permanently disabled in /etc/fstab
+  
+  kernel_modules:
+    - name: string                  # Module name (required)
+      loaded: boolean               # Whether module should be loaded (default: true)
+      persistent: boolean           # Whether module should be in /etc/modules-load.d/ (default: true)
+  
+  sysctl:
+    - parameter: string             # Sysctl parameter name (required)
+      value: integer                # Expected value (required)
+      persistent: boolean           # Whether parameter should be in /etc/sysctl.d/ (default: true)
+
+# Platform-specific requirements
+platform:
+  type: string                      # Platform type: cn5000|auto|any
+  
+  hardware:
+    present: boolean                # Whether hardware should be present
+    pci_vendor: string              # Expected PCI vendor ID (e.g., "1fc1")
+    pci_device: string              # Expected PCI device ID (e.g., "14e4" for CN5000)
+  
+  drivers:
+    - name: string                  # Driver/module name (required)
+      available: boolean            # Whether driver should be available (modinfo succeeds)
+      loaded: boolean               # Whether driver should be loaded (lsmod shows it)
+  
+  subsystem:
+    device_files:
+      - path: string                # Device file path (required)
+        exists: boolean             # Whether file should exist (default: true)
+    
+    commands:
+      - cmd: string                 # Command to execute (required)
+        expected_output: string     # Expected output pattern (required)
+
+# Service requirements
+services:
+  - name: string                    # Service name (required)
+    enabled: boolean                # Whether service should be enabled (default: true)
+    running: boolean                # Whether service should be running (default: false)
+
+# Optional checks (warnings only, not failures)
+optional:
+  firewall:
+    check: boolean                  # Whether to check firewall
+    ports: [integer]                # List of ports that should be open
+  
+  time_sync:
+    check: boolean                  # Whether to check time synchronization
+    services: [string]              # List of acceptable time sync services
+  
+  network:
+    check: boolean                  # Whether to check network connectivity
+    dns_resolution: boolean         # Whether to check DNS resolution
+    internet_connectivity: boolean  # Whether to check internet connectivity
+  
+  resources:
+    check: boolean                  # Whether to check system resources
+    min_cpu_cores: integer          # Minimum CPU cores required
+    min_memory_mb: integer          # Minimum memory in MB
+    min_disk_gb: integer            # Minimum disk space in GB
+
+# Notes:
+# - All boolean fields default to true unless specified otherwise
+# - version and version_constraint are mutually exclusive (use one or the other)
+# - platform section is optional (omit for non-platform-specific configs)
+# - optional section checks generate warnings, not failures

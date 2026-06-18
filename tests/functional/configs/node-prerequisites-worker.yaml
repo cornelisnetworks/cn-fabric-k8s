@@ -1,0 +1,74 @@
+---
+# Worker Node Prerequisites Configuration
+# Requirements for Kubernetes worker nodes
+
+packages:
+  - name: kubelet
+    version_constraint: ">=1.28.0"
+    required: true
+  
+  - name: kubeadm
+    version_constraint: ">=1.28.0"
+    required: true
+  
+  - name: kubectl
+    required: false
+  
+  - name: containerd
+    version_constraint: ">=1.6.0"
+    version_constraint_cdi: ">=1.7.0"  # For rdma-shared-device workflow
+    required: true
+
+system:
+  swap:
+    enabled: false
+    permanent: true
+  
+  kernel_modules:
+    - name: br_netfilter
+      loaded: true
+      persistent: true
+    
+    - name: overlay
+      loaded: true
+      persistent: true
+  
+  sysctl:
+    - parameter: net.bridge.bridge-nf-call-iptables
+      value: 1
+      persistent: true
+    
+    - parameter: net.ipv4.ip_forward
+      value: 1
+      persistent: true
+
+services:
+  - name: kubelet
+    enabled: true
+    running: false
+  
+  - name: containerd
+    enabled: true
+    running: true
+
+optional:
+  firewall:
+    check: true
+    ports:
+      - 10250
+      - 30000-32767
+  
+  time_sync:
+    check: true
+    services: [chronyd, systemd-timesyncd, ntpd]
+  
+  network:
+    check: true
+    dns_resolution: true
+    internet_connectivity: true
+  
+  resources:
+    check: true
+    min_cpu_cores: 2
+    min_memory_mb: 2048
+    min_disk_gb: 20

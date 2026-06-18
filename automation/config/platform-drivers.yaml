@@ -1,0 +1,93 @@
+---
+# Platform-Specific Driver Configuration
+# Defines hardware specifications and driver requirements for Cornelis Networks platforms
+
+platforms:
+  cn5000:
+    hardware:
+      pci_vendor: "434e"
+      pci_device: "0001"
+      description: "Cornelis CN5000 InfiniBand HCA"
+      generation: "current"
+    
+    drivers:
+      kernel_modules:
+        required:
+          - name: hfi1
+            description: "Cornelis CN5000 HFI driver"
+            type: "platform"
+          
+          - name: ib_core
+            description: "InfiniBand core"
+            type: "infiniband"
+          
+          - name: ib_uverbs
+            description: "InfiniBand userspace verbs"
+            type: "infiniband"
+          
+          - name: ib_ipoib
+            description: "IP over InfiniBand"
+            type: "infiniband"
+          
+          - name: rdma_cm
+            description: "RDMA connection manager"
+            type: "rdma"
+          
+          - name: rdma_ucm
+            description: "RDMA userspace connection manager"
+            type: "rdma"
+        
+        optional:
+          - name: ib_umad
+            description: "InfiniBand userspace MAD"
+            type: "infiniband"
+          
+          - name: ib_srp
+            description: "SCSI RDMA Protocol"
+            type: "infiniband"
+    
+    verification:
+      device_files:
+        - path: "/dev/infiniband/uverbs0"
+          description: "InfiniBand userspace verbs device"
+        
+        - path: "/dev/infiniband/rdma_cm"
+          description: "RDMA connection manager device"
+        
+        - path: "/dev/hfi1_0"
+          description: "HFI1 character device (native OPX/PSM2 data path)"
+      
+      commands:
+        - cmd: "ibstat"
+          expected_pattern: "State: Active"
+          description: "InfiniBand port state"
+        
+        - cmd: "ibstatus"
+          expected_pattern: "LinkUp"
+          description: "InfiniBand link status"
+        
+        - cmd: "lspci -d 434e:0001"
+          expected_pattern: "Cornelis"
+          description: "Hardware detection"
+    
+    cdi:
+      device_pattern: "/dev/hfi1_0"
+      resource_prefix: "cornelis.com"
+      resource_name: "hfi"
+      rdma_hca_max: 64
+
+# Common InfiniBand tools and utilities
+infiniband_tools:
+  required:
+    - ibstat
+    - ibstatus
+    - ibv_devinfo
+  
+  optional:
+    - perfquery
+    - ibdiagnet
+    - ibnetdiscover
+
+# Platform detection priority
+detection_order:
+  - cn5000

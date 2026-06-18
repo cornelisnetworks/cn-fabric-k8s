@@ -1,0 +1,212 @@
+# Example Pod Spec for RDMA CDI Device Plugin Workflow
+#
+# This pod demonstrates the minimum configuration required to access
+# Cornelis SuperNIC (HFI) devices via the RDMA CDI device plugin.
+#
+# Key requirements:
+# 1. Resource request: cornelis.com/hfi: 1
+# 2. Security: CAP_IPC_LOCK for memory pinning
+# 3. Shared memory: Expanded /dev/shm for PSM2/OPX
+# 4. IPC namespace: hostIPC for cross-pod shared memory
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-test-pod
+  labels:
+    app: rdma-test
+spec:
+  # Required for PSM2/OPX shared memory across pods
+  hostIPC: true
+  
+  containers:
+  - name: rdma-app
+    image: ubuntu:22.04
+    command: ["/bin/bash", "-c", "sleep infinity"]
+    
+    # Request HFI device access
+    resources:
+      limits:
+        cornelis.com/hfi: 1
+    
+    # Security context for RDMA operations
+    securityContext:
+      capabilities:
+        add:
+        - IPC_LOCK  # Required for memory pinning (DMA)
+    
+    # Expanded shared memory for PSM2/OPX
+    volumeMounts:
+    - name: dev-shm
+      mountPath: /dev/shm
+    
+    # Environment variables.
+    # CDI injects FI_PROVIDER=opx automatically. By DEFAULT no HFI/port is
+    # pinned: the OPX provider performs NUMA-aware auto-selection of an ACTIVE
+    # HFI per pod, which is the recommended behavior.
+    #
+    # The two variables below are OVERRIDE-ONLY and are NOT recommended
+    # defaults. They are shown commented out for reference. Only uncomment and
+    # set them if you must force a specific unit/port for a particular workload;
+    # pinning the wrong/inactive HFI will break OPX on multi-HFI nodes.
+    # env:
+    # - name: FI_OPX_HFI_SELECT
+    #   value: "0"   # OVERRIDE ONLY — pins HFI unit 0; default is auto-select
+    # - name: FI_OPX_PORT
+    #   value: "0"   # OVERRIDE ONLY — pins port; default is any/auto
+  
+  volumes:
+  - name: dev-shm
+    emptyDir:
+      medium: Memory
+      sizeLimit: "1Gi"  # Increase from default 64MB
+  
+  restartPolicy: Never
+
+---
+# Example: Multi-container pod with RDMA access
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-multi-container
+spec:
+  hostIPC: true
+  
+  containers:
+  # Container 1: MPI rank 0
+  # cornelis/openmpi-opx:latest is a PLACEHOLDER — no manifest in this repo
+  # builds or publishes it. Substitute your own OPX-enabled image.
+  - name: mpi-rank-0
+    image: cornelis/openmpi-opx:latest
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      echo "Rank 0 ready"
+      # Wait for other ranks
+      sleep 30
+      # Run MPI application
+      mpirun --allow-run-as-root -np 2 \
+        --mca btl ^tcp,openib \
+        --mca mtl ofi \
+        --mca mtl_ofi_provider_include opx \
+        /opt/osu-micro-benchmarks/mpi/pt2pt/osu_latency
+    resources:
+      limits:
+        cornelis.com/hfi: 1
+    securityContext:
+      capabilities:
+        add: [IPC_LOCK]
+    volumeMounts:
+    - name: dev-shm
+      mountPath: /dev/shm
+    env:
+    - name: FI_OPX_UUID
+      value: "job-12345"  # Same UUID for all ranks in this job
+  
+  # Container 2: MPI rank 1 (same placeholder image as rank 0)
+  - name: mpi-rank-1
+    image: cornelis/openmpi-opx:latest
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      echo "Rank 1 ready"
+      sleep infinity
+    resources:
+      limits:
+        cornelis.com/hfi: 1
+    securityContext:
+      capabilities:
+        add: [IPC_LOCK]
+    volumeMounts:
+    - name: dev-shm
+      mountPath: /dev/shm
+    env:
+    - name: FI_OPX_UUID
+      value: "job-12345"  # Same UUID as rank 0
+  
+  volumes:
+  - name: dev-shm
+    emptyDir:
+      medium: Memory
+      sizeLimit: "2Gi"
+  
+  restartPolicy: Never
+
+---
+# Example: Deployment with RDMA access
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rdma-app-deployment
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: rdma-app
+  template:
+    metadata:
+      labels:
+        app: rdma-app
+    spec:
+      hostIPC: true
+      
+      containers:
+      - name: app
+        image: your-rdma-app:latest
+        resources:
+          limits:
+            cornelis.com/hfi: 1
+        securityContext:
+          capabilities:
+            add: [IPC_LOCK]
+        volumeMounts:
+        - name: dev-shm
+          mountPath: /dev/shm
+      
+      volumes:
+      - name: dev-shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "1Gi"
+
+---
+# Example: Job with RDMA access
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rdma-benchmark
+spec:
+  parallelism: 8
+  completions: 8
+  template:
+    spec:
+      hostIPC: true
+      
+      containers:
+      # cornelis/osu-benchmarks:latest is a PLACEHOLDER — not built/published by
+      # any manifest in this repo. Substitute your own benchmark image.
+      - name: benchmark
+        image: cornelis/osu-benchmarks:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          # Run OSU latency benchmark
+          /opt/osu-micro-benchmarks/mpi/pt2pt/osu_latency
+        resources:
+          limits:
+            cornelis.com/hfi: 1
+        securityContext:
+          capabilities:
+            add: [IPC_LOCK]
+        volumeMounts:
+        - name: dev-shm
+          mountPath: /dev/shm
+      
+      volumes:
+      - name: dev-shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "1Gi"
+      
+      restartPolicy: Never
+  backoffLimit: 3
